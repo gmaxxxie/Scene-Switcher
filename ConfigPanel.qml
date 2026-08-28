@@ -126,6 +126,13 @@ Item {
         return name
     }
 
+    // 插件的有效开关态：锁定=系统状态；已在场景=开；未入任何场景=回显系统默认状态（新装插件正确回显）
+    function pluginEffectiveOn(p) {
+        if (p.locked) return !!p.enabled
+        if (root.pluginInScene(p.id)) return true
+        return !!p.enabled
+    }
+
     function pluginInScene(id) {
         for (var i = 0; i < root.cfgPlugins.length; i++) {
             var p = root.cfgPlugins[i]
@@ -283,16 +290,6 @@ Item {
                             font.bold: true
                             elide: Text.ElideRight
                             verticalAlignment: Text.AlignVCenter
-                        }
-                        PanelActionButton {
-                            width: Style.space(30)
-                            height: Style.space(30)
-                            size: Style.space(30)
-                            iconText: "\uF0453"
-                            tooltipText: "Refresh plugin list (pick up newly installed plugins)"
-                            foreground: root.fg
-                            hoverColor: root.fg
-                            onClicked: root.refreshList()
                         }
                         PanelActionButton {
                             width: Style.space(30)
@@ -522,7 +519,7 @@ Item {
                         }
                     }
 
-                    // ---- 插件勾选列表（所有非内置 + 内置） ----
+                                        // ---- 插件勾选列表（所有非内置 + 内置） ----
                     Text {
                         width: parent.width
                         text: "Configure: " + root.sceneLabel(root.selectedScene)
@@ -617,7 +614,7 @@ Item {
                                 onEntered: prow.hovered = true
                                 onExited: prow.hovered = false
                                 onClicked: {
-                                    if (!modelData.locked) root.togglePlugin(modelData.id, root.pluginInScene(modelData.id))
+                                    if (!modelData.locked) root.togglePlugin(modelData.id, root.pluginEffectiveOn(modelData))
                                 }
                             }
 
@@ -641,9 +638,7 @@ Item {
                                 }
                                 Text {
                                     text: modelData.id
-                                        + (modelData.locked
-                                            ? (modelData.enabled ? " · on" : " · off")
-                                            : (root.pluginInScene(modelData.id) ? " · on" : " · off"))
+                                        + (root.pluginEffectiveOn(modelData) ? " · on" : " · off")
                                         + (modelData.locked ? " · locked" : "")
                                     color: root.dim
                                     font.family: root.barFont
@@ -667,7 +662,7 @@ Item {
                                     height: Style.space(22)
                                     anchors.verticalCenter: parent.verticalCenter
                                     visible: !modelData.locked
-                                    checked: root.pluginInScene(modelData.id)
+                                    checked: root.pluginEffectiveOn(modelData)
                                     interactive: false
                                     foreground: root.fg
                                     accent: root.fg
@@ -709,6 +704,24 @@ Item {
                             }
                         }
                     }
+
+                // ---- 刷新按钮：列表右上角（User plugins 标题右侧浮层） ----
+                PanelActionButton {
+                    id: refreshBtn
+                    width: Style.space(22)
+                    height: Style.space(22)
+                    size: Style.space(18)
+                    iconText: "\uF0453"
+                    tooltipText: "Refresh plugin list (pick up newly installed plugins)"
+                    foreground: root.dim
+                    hoverColor: root.fg
+                    onClicked: root.refreshList()
+
+                    anchors.top: pluginList.top
+                    anchors.topMargin: Style.space(2)
+                    anchors.right: pluginList.right
+                    anchors.rightMargin: Style.space(6)
+                }
 
                 // ---- 底部固定 footer ----
                 Column {
