@@ -570,6 +570,8 @@ cmd_rm_plugin() {  # $1 = scene, $2 = id（scene 可为 default）
 cmd_refresh() {
   require_scenes
   acquire_lock
+  # 先让 shell 重新发现插件（新安装/克隆的插件要先 rescan 才进 catalog）
+  omarchy-shell -q shell rescanPlugins >/dev/null 2>&1 || true
   local managed; managed=$(managed_ids "$SCENES_FILE")
   snapshot_entries $(jq -r '.[]' <<<"$managed")
   regenerate_ui_state

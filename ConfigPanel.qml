@@ -140,6 +140,11 @@ Item {
 
     function close() { root.closeRequested() }
 
+    function refreshList() {
+        // 重扫插件目录 + 重生成 ui-state.json（FileView 自动刷新列表）
+        if (root.bar) root.bar.run(root.bin + " refresh")
+    }
+
     function sceneIcon(name) {
         for (var i = 0; i < root.cfgScenes.length; i++) {
             if (root.cfgScenes[i].name === name) return root.cfgScenes[i].icon || ""
@@ -278,6 +283,16 @@ Item {
                             font.bold: true
                             elide: Text.ElideRight
                             verticalAlignment: Text.AlignVCenter
+                        }
+                        PanelActionButton {
+                            width: Style.space(30)
+                            height: Style.space(30)
+                            size: Style.space(30)
+                            iconText: "\uF0453"
+                            tooltipText: "Refresh plugin list (pick up newly installed plugins)"
+                            foreground: root.fg
+                            hoverColor: root.fg
+                            onClicked: root.refreshList()
                         }
                         PanelActionButton {
                             width: Style.space(30)
