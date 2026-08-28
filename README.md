@@ -26,7 +26,7 @@ cafe, Focus at a desk — with one click or keypress instead of editing
 
 ```sh
 # 1. Install the plugin (from the marketplace URL or this repository)
-omarchy plugin add https://github.com/<your-name>/omarchy-scene.git --enable
+omarchy plugin add https://github.com/gmaxxxie/Scene-Switcher.git --enable
 
 # 2. Install the companion CLI (the widget delegates to it)
 install -Dm755 omarchy-scene "$HOME/.local/bin/omarchy-scene"
