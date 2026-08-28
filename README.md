@@ -20,9 +20,16 @@ cafe, Focus at a desk — with one click or keypress instead of editing
   atomically rewriting `~/.config/omarchy/shell.json` (positions/settings of
   enabled plugins are cached and restored on re-enable)
 - **Config panel** — lazy-loaded centered overlay (destroyed on close):
-  per-scene plugin toggles, lock/unlock buttons, preset icon picker, and a ⟳ refresh button at the top-right of the plugin list (next to "User plugins") that rescans plugins so newly installed ones appear immediately
   scene tabs, create/rename/delete (max 5 custom scenes, names ≤10 chars),
   per-scene plugin toggles, lock/unlock buttons, and a preset icon picker
+  (30 icons) for each scene
+- **Refresh plugins** — a ⟳ button at the top-right of the plugin list
+  (next to the "User plugins" header) rescans the plugin registry, so plugins
+  newly installed through `omarchy plugin add`/`clone` appear immediately
+- **Status echo** — each row shows the plugin's effective state: locked
+  plugins and omarchy built-ins follow the system default; plugins in a scene
+  show the scene switch state; unmanaged (new) plugins echo their system
+  default on/off
 - **Locked plugins** — locked plugins are inherited by every scene (always on);
   omarchy built-ins are listed after user plugins, locked by default and
   following the system state — unlock them to manage manually
