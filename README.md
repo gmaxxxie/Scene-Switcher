@@ -84,6 +84,17 @@ files atomically (backing up `shell.json` before each switch), and issues a
 reload query to the running shell. It never uses `sudo`, starts no extra
 Quickshell process, and sends no network traffic.
 
+## Development
+
+This repository is the source of truth. The live plugin folder
+(`~/.config/omarchy/plugins/max.scene`) is a deployed copy — edit here, then
+deploy (the shell hot-reloads on save):
+
+```sh
+./sync.sh          # copy the runtime files to the live folder
+omarchy plugin validate .   # spec validation before pushing
+```
+
 ## License
 
 MIT — see [`LICENSE`](LICENSE).
