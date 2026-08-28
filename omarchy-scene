@@ -1,0 +1,851 @@
+#!/usr/bin/env bash
+#
+# omarchy-scene - Scene-based omarchy plugin set switcher
+#
+# Switch omarchy plugin sets by occasion (scene):
+#   - default is just a normal scene type, independent of the others
+#   - switching = enable only the scene's own plugins (non-builtin); unlisted plugins are untouched
+#
+# Mechanism: atomically rewrite ~/.config/omarchy/shell.json (shell hot-reloads) and cache each
+# managed plugin's full entry (position + settings), restoring it exactly on re-enable.
+#
+# Usage:
+#   omarchy-scene list                list all scenes and plugin membership
+#   omarchy-scene current             print the current scene
+#   omarchy-scene set <scene> [--dry-run]   switch to a scene
+#   omarchy-scene cycle [--dry-run]   cycle to the next scene (keybind-friendly)
+#   omarchy-scene init [--force]      bootstrap config from currently enabled plugins
+#   omarchy-scene add <name> [--label <label>]   create a scene
+#   omarchy-scene rm <name>           delete a scene
+#   omarchy-scene add-plugin <scene> <plugin-id>  add a plugin to a scene
+#   omarchy-scene rm-plugin <scene> <plugin-id>   remove a plugin from a scene
+#   omarchy-scene refresh             re-snapshot all managed plugin entries
+#   omarchy-scene menu-add            write the Scenes submenu into omarchy-menu.jsonc
+#   omarchy-scene menu-remove         remove the Scenes submenu
+#   omarchy-scene edit                open scenes.json with $EDITOR
+#   omarchy-scene label <scene> <label>   rename a scene's display name
+#   omarchy-scene icon <scene> <glyph>     set a scene's bar icon (empty glyph clears)
+#   omarchy-scene rename <old> <new>      rename a scene (key; keeps its label)
+#   omarchy-scene status              per-plugin: current vs target state
+#
+# Config:
+#   ~/.config/omarchy/scenes/scenes.json   scene definitions (user-editable)
+#   ~/.config/omarchy/scenes/entries.json  managed plugin entry cache (auto-maintained)
+
+set -euo pipefail
+
+CONFIG_DIR="${OMARCHY_SCENES_DIR:-$HOME/.config/omarchy/scenes}"
+SCENES_FILE="$CONFIG_DIR/scenes.json"
+ENTRIES_FILE="$CONFIG_DIR/entries.json"
+UI_STATE_FILE="$CONFIG_DIR/ui-state.json"
+SHELL_JSON="$HOME/.config/omarchy/shell.json"
+MENU_FILE="$HOME/.config/omarchy/extensions/omarchy-menu.jsonc"
+MENU_MARK_BEGIN="// BEGIN omarchy-scene (auto-generated; omarchy-scene menu-add/refresh manage this block)"
+MENU_MARK_END="// END omarchy-scene"
+SHELL_RELOAD_CMD="omarchy-shell -q shell reloadConfig"
+
+# ---------------------------------------------------------------- helpers
+
+die() { echo "omarchy-scene: $*" >&2; exit 1; }
+
+ensure_config_dir() { mkdir -p "$CONFIG_DIR"; }
+
+require_scenes() {
+  [[ -f "$SCENES_FILE" ]] || die "not found: $SCENES_FILE — run: omarchy-scene init"
+  jq -e '.version == 1' "$SCENES_FILE" >/dev/null 2>&1 \
+    || die "invalid $SCENES_FILE (missing version: 1)"
+}
+
+# 解析参数并读出: current / default 数组 / scenes 对象
+scenes_meta() {
+  jq -r '{current: (.current // "default"), default: (.default // []), scenes: (.scenes // {})}' "$SCENES_FILE"
+}
+
+scene_exists() {  # $1 = scene name（"default" 视为有效集合名）
+  [[ -n "$1" ]] || return 1
+  [[ "$1" == "default" ]] && return 0
+  jq -e --arg s "$1" '.scenes | has($s)' "$SCENES_FILE" >/dev/null 2>&1
+}
+
+plugin_in_catalog() {  # $1 = plugin id
+  omarchy plugin list --json 2>/dev/null | jq -e --arg id "$1" 'any(.[]; .id == $id)' >/dev/null 2>&1
+}
+
+catalog_kinds() {  # $1 = id -> 逗号分隔 kinds（用于提示，非关键路径）
+  omarchy plugin list --json 2>/dev/null | jq -r --arg id "$1" '.[] | select(.id == $id) | (.kinds | join(","))'
+}
+
+# 原子写文件: 内容通过 stdin 传入，$1 = 目标路径
+write_atomic() {
+  local tmp
+  tmp="${1}.tmp.$$"
+  cat > "$tmp"
+  mv "$tmp" "$1"
+}
+
+reload_shell() {
+  # 写 shell.json 会触发热重载；这里再兜底一次，保证配置被应用
+  eval "$SHELL_RELOAD_CMD" 2>/dev/null || true
+}
+
+notify() {  # $1 = 标题 $2 = 正文
+  command -v notify-send >/dev/null 2>&1 && notify-send -a "omarchy-scene" -i "view-grid-symbolic" "$1" "$2" 2>/dev/null || true
+}
+
+# 从 shell.json 快照一批插件（$@=ids）到 entries.json（合并更新，保留已有）
+# 快照内容: bar-widget -> {section, entry}; service/panel/overlay -> {entry}; bar -> {bar:true}
+snapshot_entries() {
+  [[ $# -eq 0 ]] && return 0
+  local ids_json new_snap
+  ids_json=$(printf '%s\n' "$@" | jq -R . | jq -s .)
+  new_snap=$(jq -n \
+    --argjson shell "$(cat "$SHELL_JSON")" \
+    --argjson ids "$ids_json" '
+      def widget_loc($id):
+        (["left","center","right"] | map(.
+          | select(([$shell.bar.layout[.][].id // ""] | index($id)) != null)
+          | { section: .,
+              index: ([$shell.bar.layout[.][].id // ""] | index($id)),
+              entry: ($shell.bar.layout[.] | map(select(.id == $id)) | first) }
+        ) | first?);
+      [ ($ids[]) as $id |
+        {
+          id: $id,
+          snap: (
+            (widget_loc($id)) as $loc |
+            (([$shell.plugins[] | select(.id == $id)] | first?)) as $p |
+            if $loc then $loc
+            elif $p then { entry: $p }
+            elif ($shell.bar.id // "") == $id then { bar: true }
+            else {} end
+          )
+        } | select(.snap != {}) ] | map({(.id): .snap}) | add
+    ')
+  [[ -z "$new_snap" || "$new_snap" == "null" ]] && return 0
+  ensure_config_dir
+  if [[ -f "$ENTRIES_FILE" ]]; then
+    jq -s '.[0] * .[1]' "$ENTRIES_FILE" <(printf '%s\n' "$new_snap") > "${ENTRIES_FILE}.tmp" \
+      && mv "${ENTRIES_FILE}.tmp" "$ENTRIES_FILE"
+  else
+    printf '%s\n' "$new_snap" > "$ENTRIES_FILE"
+  fi
+}
+
+# 计算受管集合: default ∪ 所有场景里的插件（去重、保持顺序）
+managed_ids() {
+  jq -r '
+    ([.default // []] + [.scenes[]?.plugins // []] + [.locked // []]) | add | unique
+  ' "$SCENES_FILE"
+}
+
+# 计算目标集合: default ∪ 指定场景插件（scene 为 default 时仅默认集）
+target_ids() {  # $1 = scene —— 非 default 场景 = 锁定插件（继承）+ 该场景自己的插件；default = 默认清单
+  if [[ "$1" == "default" ]]; then
+    jq -r '[.default // []] | add | unique' "$SCENES_FILE"
+  else
+    jq -r --arg s "$1" '
+      ([.locked // []] + [.scenes[$s].plugins // []]) | add | unique
+    ' "$SCENES_FILE"
+  fi
+}
+
+# ---------------------------------------------------------------- transform
+
+# 核心 jq 转换：把 shell.json 变成目标状态
+read -r -d '' TRANSFORM <<'JQ' || true
+  def ensure_shape:
+    .bar = (.bar // {})
+    | .bar.layout = (.bar.layout // {})
+    | (.bar.layout.left //= [])
+    | (.bar.layout.center //= [])
+    | (.bar.layout.right //= [])
+    | .plugins = (.plugins // []);
+
+  def in_target($id): ($targets | index($id)) != null;
+  def is_bar_opt($id): (($catalog[$id].kinds // []) | index("bar")) != null;
+  def is_widget($id): (($catalog[$id].kinds // []) | index("bar-widget")) != null;
+  def is_fp($id): ($catalog[$id].firstParty // false) == true;
+  def widget_present($id): ([.bar.layout[] | .[] | .id // ""] | index($id)) != null;
+  def plugin_present($id): ([.plugins[].id // ""] | index($id)) != null;
+
+  def remove_layout($id):
+    .bar.layout = (.bar.layout | with_entries(.value |= map(select((.id // "") != $id))));
+  def remove_plugins($id):
+    .plugins |= map(select((.id // "") != $id));
+  def remove_disabled($id):
+    if (.disabledPlugins? | type) == "array"
+      then .disabledPlugins |= map(select(. != $id))
+      else . end;
+  def add_disabled($id):
+    if ((.disabledPlugins? // []) | index($id)) == null
+      then .disabledPlugins = ((.disabledPlugins? // []) + [$id])
+      else . end;
+  def clean_disabled:
+    if (.disabledPlugins? | type) == "array" and (.disabledPlugins | length) == 0
+      then del(.disabledPlugins)
+      else . end;
+
+  def insert_widget($id):
+    if widget_present($id) then . else
+      ($cache[$id]) as $c
+      | if ($c.entry? != null)
+          then
+            ($c.section // "right") as $s
+            | ($c.index // -1) as $i
+            | .bar.layout[$s] |= (
+                if $i < 0 then . + [$c.entry]
+                else (([$i, length] | min)) as $at | .[0:$at] + [$c.entry] + .[$at:]
+                end)
+          else .bar.layout.right += [{id: $id}]
+        end
+    end;
+
+  def insert_plugin($id):
+    if plugin_present($id) then . else
+      ($cache[$id]) as $c
+      | if ($c.entry? != null)
+          then .plugins += [$c.entry]
+          else .plugins += [{id: $id}]
+        end
+    end;
+
+  ensure_shape
+  | reduce ($managed[]) as $id (.;
+      if in_target($id) then
+        if is_bar_opt($id) then .bar.id = $id
+        elif is_widget($id) then insert_widget($id) | remove_disabled($id)
+        else insert_plugin($id) | remove_disabled($id)
+        end
+      else
+        if is_bar_opt($id) then
+          if ((.bar.id // "") == $id) then del(.bar.id) else . end
+        elif is_widget($id) then remove_layout($id)
+        else remove_plugins($id) | if is_fp($id) then add_disabled($id) else . end
+        end
+      end
+    )
+  | clean_disabled
+JQ
+
+# 计算“启用状态”视图: id -> true/false，用于 diff 报告
+# $1 = catalog JSON；$2 = 要读的 shell 文件（默认 SHELL_JSON）
+enabled_map() {
+  local src="${2:-$SHELL_JSON}"
+  jq -r --argjson catalog "$1" '
+    def is_disabled($id): (.disabledPlugins? | index($id)) != null;
+    def in_layout($id): ([.bar.layout[] | .[] | .id // ""] | index($id)) != null;
+    def in_plugins($id): ([.plugins[].id // ""] | index($id)) != null;
+    ($catalog | keys)[] as $id |
+    (($catalog[$id].kinds // []) | index("bar")) as $isbar |
+    if $isbar then {($id): ((.bar.id // "") == $id)}
+    elif (is_disabled($id)) then {($id): false}
+    elif ($catalog[$id].firstParty) then {($id): true}
+    else {($id): (in_layout($id) or in_plugins($id))}
+    end
+  ' "$src" | jq -s add
+}
+
+# ---------------------------------------------------------------- commands
+
+cmd_help() {
+  sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+cmd_init() {
+  local force=0
+  [[ ${1:-} == "--force" ]] && force=1
+  if [[ -f "$SCENES_FILE" && $force -eq 0 ]]; then
+    die "$SCENES_FILE already exists (use --force to overwrite; the old file is backed up)"
+  fi
+  ensure_config_dir
+  [[ -f "$SCENES_FILE" ]] && cp "$SCENES_FILE" "${SCENES_FILE}.bak.$(date +%s)"
+
+  local ids
+  ids=$(jq -r '[.bar.layout.left[], .bar.layout.center[], .bar.layout.right[], .plugins[]] | map(.id) | unique | .[]' "$SHELL_JSON")
+  [[ -n "$ids" ]] || die "no manageable plugin entries in shell.json"
+
+  # 快照这些插件的完整条目
+  snapshot_entries $ids
+
+  local ids_json default_json
+  ids_json=$(printf '%s\n' "$ids" | jq -R . | jq -s .)
+  default_json=$(printf '%s\n' "$ids" | jq -R . | jq -s .)
+
+  jq -n --argjson default "$default_json" '
+    {
+      version: 1,
+      current: "default",
+      _comment: "omarchy-scene scene config. default is a normal scene type, independent of the others. Switching enables only its own plugins (non-builtin) plus locked plugins (inherited by every scene, always on); plugins in no scene are unmanaged. omarchy built-ins are shown in the panel after user plugins and locked by default (they follow the system state); unlock them (unlockedBuiltins) to manage manually. Manage with omarchy-scene add/add-plugin/rm/rm-plugin/toggle-plugin/lock/unlock, or edit this file directly.",
+      default: $default,
+      locked: [],
+      unlockedBuiltins: [],
+      scenes: {}
+    }
+  ' | write_atomic "$SCENES_FILE"
+  regenerate_ui_state
+
+  echo "initialized $SCENES_FILE"
+  echo "  default set (currently enabled plugins): $(echo "$ids" | tr '\n' ' ')"
+  echo "Next: omarchy-scene add <name> --label <label>  # create a scene, then omarchy-scene add-plugin <scene> <plugin-id>"
+  echo "      omarchy-scene list      # view"
+}
+
+cmd_list() {
+  require_scenes
+  local meta current
+  meta=$(scenes_meta)
+  current=$(jq -r '.current' <<<"$meta")
+  local catalog
+  catalog=$(omarchy plugin list --json 2>/dev/null | jq 'map({(.id): {kinds: .kinds, firstParty: .firstParty}}) | add')
+  local em
+  em=$(enabled_map "$catalog")
+
+  echo "Current scene: $current"
+  echo
+  echo "default scene (independent of others):"
+  jq -r '.default[]' "$SCENES_FILE" | while read -r id; do
+    local st; st=$(jq -r --arg id "$id" '.[$id] // false' <<<"$em")
+    printf '  %s %s\n' "$([[ $st == true ]] && echo '✓' || echo '·')" "$id"
+  done
+  echo
+  jq -r '.scenes | to_entries[] | [.key, (.value.label // .key), (.value.plugins // [] | join(" "))] | @tsv' "$SCENES_FILE" | while IFS=$'\t' read -r name label rest; do
+    echo "Scene $name ($label):"
+    [[ -z "$rest" ]] && echo "  (no dedicated plugins)"
+    for id in $rest; do
+      local st; st=$(jq -r --arg id "$id" '.[$id] // false' <<<"$em")
+      printf '  %s %s\n' "$([[ $st == true ]] && echo '✓' || echo '·')" "$id"
+    done
+  done
+  echo
+  echo "Hint: omarchy-scene set <scene> to switch; omarchy-scene menu-add to generate the bar menu"
+}
+
+cmd_current() { require_scenes; jq -r '.current // "default"' "$SCENES_FILE"; }
+
+cmd_set() {  # $1 = scene, $2 = --dry-run
+  require_scenes
+  local scene="${1:-}"
+  local dry=0
+  [[ ${2:-} == "--dry-run" ]] && dry=1
+  scene_exists "$scene" || die "unknown scene: '$scene' (available: $(jq -r '.scenes | keys | join(", ")' "$SCENES_FILE"))"
+
+  local managed targets
+  managed=$(managed_ids "$SCENES_FILE")
+  targets=$(target_ids "$scene")
+  # managed / targets 本身就是合法 JSON 数组（jq 输出），直接作为 --argjson 传入
+  local catalog
+  catalog=$(omarchy plugin list --json 2>/dev/null | jq 'map({(.id): {kinds: .kinds, firstParty: .firstParty}}) | add')
+
+  # 1) 先快照当前受管集合（保证切换后被关闭的插件位置/设置不丢）
+  if [[ $dry -eq 0 ]]; then
+    snapshot_entries $(jq -r '.[]' <<<"$managed")
+  fi
+
+  # 2) 计算前后启用状态，生成 diff
+  local before after
+  before=$(enabled_map "$catalog")
+  local tmp_shell
+  tmp_shell=$(mktemp)
+  jq -r "$TRANSFORM" \
+    --argjson targets "$targets" \
+    --argjson managed "$managed" \
+    --argjson cache "$(cat "$ENTRIES_FILE" 2>/dev/null || echo '{}')" \
+    --argjson catalog "$catalog" \
+    "$SHELL_JSON" > "$tmp_shell"
+  after=$(enabled_map "$catalog" "$tmp_shell")
+
+  # diff 报告
+  local to_enable to_disable
+  to_enable=$(jq -nr --argjson a "$before" --argjson b "$after" '
+    ($b | to_entries | map(select(.value == true))) as $ben |
+    ($a | to_entries | map(select(.value == true))) as $aen |
+    ([$ben[].key] - [$aen[].key]) | .[]
+  ' | grep -v '^$' || true)
+  to_disable=$(jq -nr --argjson a "$before" --argjson b "$after" '
+    ($b | to_entries | map(select(.value == true))) as $ben |
+    ($a | to_entries | map(select(.value == true))) as $aen |
+    ([$aen[].key] - [$ben[].key]) | .[]
+  ' | grep -v '^$' || true)
+
+  echo "Scene [$scene]:"
+  [[ -n "$to_enable" ]] && for id in $to_enable; do echo "  + enable  $id"; done || true
+  [[ -n "$to_disable" ]] && for id in $to_disable; do echo "  - disable  $id"; done || true
+  [[ -z "$to_enable" && -z "$to_disable" ]] && echo "  (no change)"
+
+  if [[ $dry -eq 1 ]]; then
+    echo
+    echo "(dry-run, nothing written; drop --dry-run to apply)"
+    rm -f "$tmp_shell"
+    return 0
+  fi
+
+  # 3) 备份 + 原子写
+  cp "$SHELL_JSON" "$SHELL_JSON.bak.scene.$(date +%s)"
+  cat "$tmp_shell" > "${SHELL_JSON}.tmp"
+  jq -e . "${SHELL_JSON}.tmp" >/dev/null || { rm -f "${SHELL_JSON}.tmp" "$tmp_shell"; die "transform produced invalid JSON, write aborted"; }
+  mv "${SHELL_JSON}.tmp" "$SHELL_JSON"
+  rm -f "$tmp_shell"
+
+  # 4) 记录当前场景
+  jq --arg s "$scene" '.current = $s' "$SCENES_FILE" | write_atomic "$SCENES_FILE"
+  regenerate_ui_state
+
+  reload_shell
+  notify "Scene switched" "$scene"
+  echo "Switched to scene: $scene"
+}
+
+cmd_cycle() {
+  require_scenes
+  local dry=0
+  [[ ${1:-} == "--dry-run" ]] && dry=1
+  local current
+  current=$(jq -r '.current // "default"' "$SCENES_FILE")
+  local names; names=$(jq -r '.scenes | keys | .[]' "$SCENES_FILE")
+  local list; list=$(printf '%s\n' "default"; printf '%s\n' "$names")
+  [[ -n "$names" ]] || die "no scenes yet — run: omarchy-scene add <name>"
+  local next
+  # 在当前项之后取下一个；若当前不在列表（如旧状态）则取第一个
+  next=$(awk -v c="$current" '{ if (found) { print; exit } if ($0==c) found=1 }' <<<"$list")
+  [[ -z "$next" ]] && next=$(head -n1 <<<"$list")
+  if [[ $dry -eq 1 ]]; then
+    echo "current: $current -> next: $next (dry-run)"
+    return 0
+  fi
+  cmd_set "$next"
+}
+
+MAX_SCENES=5
+MAX_NAME_LEN=10
+
+cmd_add() {  # $1 = name, --label, --icon
+  require_scenes
+  local name="${1:-}"; local label="" icon=""
+  [[ -n "$name" ]] || die "usage: omarchy-scene add <name> [--label <label>] [--icon <glyph>]"
+  shift
+  while (( $# > 0 )); do
+    case "$1" in
+      --label) label="${2:-}"; shift 2 ;;
+      --icon) icon="${2:-}"; shift 2 ;;
+      *) die "unknown argument: $1" ;;
+    esac
+  done
+  scene_exists "$name" && die "scene already exists: $name"
+  [[ $name =~ ^[a-zA-Z0-9_-]+$ ]] || die "scene name may only contain letters/digits/-/_"
+  [[ ${#name} -le $MAX_NAME_LEN ]] || die "scene name too long (max $MAX_NAME_LEN characters)"
+  [[ -z "$label" ]] && label="$name"
+  [[ ${#label} -le $MAX_NAME_LEN ]] || die "scene label too long (max $MAX_NAME_LEN characters)"
+  [[ ${#icon} -le 4 ]] || die "scene icon too long (max 4 characters)"
+  local n
+  n=$(jq -r '.scenes | length' "$SCENES_FILE")
+  [[ $n -lt $MAX_SCENES ]] || die "maximum $MAX_SCENES custom scenes reached"
+  if [[ -n "$icon" ]]; then
+    jq --arg n "$name" --arg l "$label" --arg i "$icon" '.scenes[$n] = {label: $l, plugins: [], icon: $i}' "$SCENES_FILE" | write_atomic "$SCENES_FILE"
+  else
+    jq --arg n "$name" --arg l "$label" '.scenes[$n] = {label: $l, plugins: []}' "$SCENES_FILE" | write_atomic "$SCENES_FILE"
+  fi
+  regenerate_ui_state
+  echo "created scene $name (label=$label). Add plugins: omarchy-scene add-plugin $name <plugin-id>"
+}
+
+cmd_rm() {
+  require_scenes
+  local name="${1:-}"
+  [[ -n "$name" ]] || die "Usage: omarchy-scene rm <name>"
+  scene_exists "$name" || die "unknown scene: $name"
+  [[ "$(jq -r '.current' "$SCENES_FILE")" == "$name" ]] && die "cannot delete the current scene (switch first: omarchy-scene set <other>)"
+  jq --arg n "$name" 'del(.scenes[$n])' "$SCENES_FILE" | write_atomic "$SCENES_FILE"
+  regenerate_ui_state
+  echo "deleted scene $name"
+}
+
+cmd_add_plugin() {  # $1 = scene, $2 = id（scene 可为 default）
+  require_scenes
+  local scene="${1:-}" id="${2:-}"
+  [[ -n "$scene" && -n "$id" ]] || die "Usage: omarchy-scene add-plugin <scene|default> <plugin-id>"
+  scene_exists "$scene" || die "unknown scene: $scene"
+  plugin_in_catalog "$id" || die "unknown plugin: $id (see omarchy plugin list)"
+  local kinds; kinds=$(catalog_kinds "$id")
+  if [[ "$scene" == "default" ]]; then
+    jq -e --arg i "$id" '(.default | index($i)) == null' "$SCENES_FILE" >/dev/null \
+      || die "plugin $id is already in default"
+    jq --arg i "$id" '.default += [$i]' "$SCENES_FILE" | write_atomic "$SCENES_FILE"
+  else
+    jq -e --arg s "$scene" --arg i "$id" '(.scenes[$s].plugins | index($i)) == null' "$SCENES_FILE" >/dev/null \
+      || die "plugin $id is already in scene $scene"
+    jq --arg s "$scene" --arg i "$id" '.scenes[$s].plugins += [$i]' "$SCENES_FILE" | write_atomic "$SCENES_FILE"
+  fi
+  # 快照条目（若当前启用）
+  snapshot_entries "$id"
+  regenerate_ui_state
+  echo "added $id ($kinds) to $scene"
+  echo "Hint: run omarchy-scene menu-add to refresh the bar menu"
+}
+
+cmd_rm_plugin() {  # $1 = scene, $2 = id（scene 可为 default）
+  require_scenes
+  local scene="${1:-}" id="${2:-}"
+  [[ -n "$scene" && -n "$id" ]] || die "Usage: omarchy-scene rm-plugin <scene|default> <plugin-id>"
+  scene_exists "$scene" || die "unknown scene: $scene"
+  if [[ "$scene" == "default" ]]; then
+    jq -e --arg i "$id" '(.default | index($i)) != null' "$SCENES_FILE" >/dev/null \
+      || die "plugin $id is not in default"
+    jq --arg i "$id" '.default |= map(select(. != $i))' "$SCENES_FILE" | write_atomic "$SCENES_FILE"
+  else
+    jq -e --arg s "$scene" --arg i "$id" '(.scenes[$s].plugins | index($i)) != null' "$SCENES_FILE" >/dev/null \
+      || die "plugin $id is not in scene $scene"
+    jq --arg s "$scene" --arg i "$id" '.scenes[$s].plugins |= map(select(. != $i))' "$SCENES_FILE" | write_atomic "$SCENES_FILE"
+  fi
+  regenerate_ui_state
+  echo "removed $id from $scene"
+}
+
+cmd_refresh() {
+  require_scenes
+  local managed; managed=$(managed_ids "$SCENES_FILE")
+  snapshot_entries $(jq -r '.[]' <<<"$managed")
+  regenerate_ui_state
+  echo "refreshed $(jq -r '.[]' <<<"$managed" | wc -l) managed plugin entry snapshots"
+}
+
+cmd_status() {
+  require_scenes
+  local current; current=$(jq -r '.current // "default"' "$SCENES_FILE")
+  local catalog
+  catalog=$(omarchy plugin list --json 2>/dev/null | jq 'map({(.id): {kinds: .kinds, firstParty: .firstParty}}) | add')
+  local em; em=$(enabled_map "$catalog")
+  local targets; targets=$(target_ids "$current")
+  local managed; managed=$(managed_ids "$SCENES_FILE")
+
+  echo "Current scene: $current"
+  echo "plugin                     state      target"
+  echo "----------------------------------------"
+  for id in $(jq -r '.[]' <<<"$managed"); do
+    local st in_target
+    st=$(jq -r --arg id "$id" '.[$id] // false' <<<"$em")
+    if jq -e --arg id "$id" 'index($id) != null' <<<"$targets" >/dev/null; then in_target="on"; else in_target="off"; fi
+    local mark="  "
+    [[ "$st" == "$([[ $in_target == on ]] && echo true || echo false)" ]] && mark="OK" || mark="!!"
+    printf '  %-24s %-5s %-5s %s\n' "$id" "$st" "$in_target" "$mark"
+  done
+  echo "(OK=matches target; !!=needs a switch to take effect)"
+}
+
+cmd_menu_add() {
+  require_scenes
+  # 生成 JSONC 块: scenes 子菜单 + 每个场景一行（嵌套 id: scenes.<name>）
+  # 注意: 用 jq -r + tostring 保留内部转义（如 checked 里的 \"）；block 写入临时文件供 awk 读取，
+  #       避免经 awk -v 传参时反斜杠被解释。
+  local blockfile
+  blockfile=$(mktemp)
+  jq -r '
+    [["scenes", {icon: "󰕮", label: "Scenes"}]] +
+    [.scenes | to_entries[] | ["scenes." + .key, {icon: "", label: (.value.label // .key),
+       checked: ("test \"$(omarchy-scene current 2>/dev/null)\" = " + .key),
+       action: ("omarchy-scene set " + .key)}]]
+    | .[]
+    | "\"" + .[0] + "\": " + (.[1] | tostring)
+  ' "$SCENES_FILE" | paste -sd, - | sed 's/^/  /' > "$blockfile"
+
+  [[ -f "$MENU_FILE" ]] || { rm -f "$blockfile"; die "not found: $MENU_FILE"; }
+  local tmp
+  tmp=$(mktemp)
+  if grep -qF "$MENU_MARK_BEGIN" "$MENU_FILE"; then
+    awk -v begin="$MENU_MARK_BEGIN" -v end="$MENU_MARK_END" -v bf="$blockfile" '
+      function dump() { while ((getline l < bf) > 0) print l; close(bf) }
+      index($0, begin) { skip=1; print; dump(); next }
+      index($0, end)   { skip=0; print; next }
+      !skip { print }
+    ' "$MENU_FILE" > "$tmp"
+  else
+    # 在最后一个 "}"（对象闭合）行之前插入
+    if grep -nq '^}' "$MENU_FILE"; then
+      local last
+      last=$(grep -n '^}' "$MENU_FILE" | tail -n1 | cut -d: -f1)
+      { head -n "$((last-1))" "$MENU_FILE"; echo "$MENU_MARK_BEGIN"; cat "$blockfile"; echo "$MENU_MARK_END"; echo "}"; sed -n "$((last+1)),\$p" "$MENU_FILE"; } > "$tmp"
+    else
+      { cat "$MENU_FILE"; echo; echo "$MENU_MARK_BEGIN"; cat "$blockfile"; echo "$MENU_MARK_END"; } > "$tmp"
+    fi
+  fi
+  rm -f "$blockfile"
+  # 校验注入后仍能解析为合法 JSON（去掉行注释后）
+  if ! jq -e . <(sed -E 's|//.*||' "$tmp") >/dev/null 2>&1; then
+    rm -f "$tmp"
+    die "generated menu is not valid JSON, write aborted (check scenes.json or handle $MENU_FILE manually)"
+  fi
+  mv "$tmp" "$MENU_FILE"
+  echo "wrote the Scenes submenu to $MENU_FILE (menu hot-reloads on save)"
+  echo "Note: after adding/removing scenes/plugins, rerun omarchy-scene menu-add; or omarchy-scene menu-remove to remove it"
+}
+
+cmd_menu_remove() {
+  [[ -f "$MENU_FILE" ]] || die "not found: $MENU_FILE"
+  if grep -qF "$MENU_MARK_BEGIN" "$MENU_FILE"; then
+    awk -v begin="$MENU_MARK_BEGIN" -v end="$MENU_MARK_END" '
+      index($0, begin) { skip=1; next }
+      index($0, end)   { skip=0; next }
+      !skip { print }
+    ' "$MENU_FILE" > "${MENU_FILE}.tmp" && mv "${MENU_FILE}.tmp" "$MENU_FILE"
+    echo "removed the Scenes submenu"
+  else
+    echo "no Scenes submenu marker found ($MENU_FILE)"
+  fi
+}
+
+cmd_edit() {
+  require_scenes
+  local editor="${EDITOR:-nano}"
+  command -v "$editor" >/dev/null 2>&1 || editor=nano
+  "$editor" "$SCENES_FILE"
+}
+
+# bar 标签轮询用: 只输出当前场景名 + 显示名
+cmd_bar_status() {
+  require_scenes
+  jq -c '
+    (.current // "default") as $c |
+    { current: $c,
+      label: (if $c == "default" then "Default" else ((.scenes[$c].label // $c)) end) }
+  ' "$SCENES_FILE"
+}
+
+# 弹窗列表用: 输出全部场景（含 default）
+cmd_scenes_json() {
+  require_scenes
+  jq -c '
+    (.current // "default") as $c |
+    (["default"] + (.scenes | keys)) as $names |
+    { current: $c,
+      currentLabel: (if $c == "default" then "Default" else ((.scenes[$c].label // $c)) end),
+      scenes: (
+        [ $names[] as $n |
+          { name: $n,
+            label: (if $n == "default" then "Default" else ((.scenes[$n].label // $n)) end),
+            active: ($n == $c),
+            count: (if $n == "default" then ((.default // []) | length)
+                    else ((.scenes[$n].plugins // []) | length) end) }
+        ]
+      ) }
+  ' "$SCENES_FILE"
+}
+
+# 合并数据（插件目录 + scenes.json），供 UI 渲染；输出到 stdout
+config_payload() {
+  local catalog
+  catalog=$(omarchy plugin list --json 2>/dev/null)
+  [[ -z "$catalog" || "$catalog" == "null" ]] && catalog="[]"
+  jq --argjson cat "$catalog" '
+    (.default // []) as $def |
+    (.scenes // {}) as $scn |
+    (.locked // []) as $lock |
+    (.unlockedBuiltins // []) as $unlocked |
+    (.current // "default") as $c |
+    (.defaultIcon // "") as $dIcon |
+    ($cat | map(select(.firstParty == true) | .id)) as $fp |
+    { current: $c,
+      scenes: (
+        (["default"] + ($scn | keys)) | map(. as $n |
+          { name: $n,
+            icon: (if $n == "default" then $dIcon else ((($scn[$n].icon) // "")) end),
+            label: (if $n == "default" then "Default" else (($scn[$n].label // $n)) end),
+            active: ($n == $c),
+            lockedCount: ($lock | length),
+            count: (if $n == "default"
+                    then ($def | map(select(. as $id | ($fp | index($id)) == null)) | length)
+                    else (($scn[$n].plugins // []) | map(select(. as $id | ($fp | index($id)) == null)) | length) end) })
+      ),
+      plugins: (
+        (($cat | map(select(.firstParty != true))) + ($cat | map(select(.firstParty == true))))
+        | map(. as $pl |
+          { id: $pl.id, name: $pl.name, kinds: $pl.kinds,
+            enabled: ($pl.enabled == true),
+            firstParty: ($pl.firstParty == true),
+            locked: (if $pl.firstParty
+                     then (($unlocked | index($pl.id)) == null)
+                     else (($lock | index($pl.id)) != null) end),
+            inDefault: (($def | index($pl.id)) != null),
+            inScenes: (($scn | to_entries | map(select((.value.plugins // []) | index($pl.id) != null) | .key))) })
+      ) }
+  ' "$SCENES_FILE"
+}
+
+cmd_config_json() { require_scenes; config_payload; }
+
+# 把合并数据写进 ui-state.json，供 bar 组件 FileView 监听实时刷新
+regenerate_ui_state() {
+  config_payload > "${UI_STATE_FILE}.tmp" && mv "${UI_STATE_FILE}.tmp" "$UI_STATE_FILE"
+}
+
+# 配置面板用：切换插件开关（on/off）——内部就是 omarchy plugin enable/disable，并同步场景清单
+cmd_toggle_plugin() {  # $1 = scene, $2 = id, $3 = on|off
+  require_scenes
+  local scene="${1:-}" id="${2:-}" state="${3:-}"
+  [[ -n "$scene" && -n "$id" ]] || die "usage: omarchy-scene toggle-plugin <scene> <id> on|off"
+  scene_exists "$scene" || die "unknown scene: $scene"
+  plugin_in_catalog "$id" || die "unknown plugin: $id（run omarchy plugin list）"
+  [[ $state == "on" || $state == "off" ]] || die "state must be on or off"
+
+  if [[ $state == "on" ]]; then
+    local sec
+    sec=$(jq -r --arg i "$id" '.[$i].section // ""' "$ENTRIES_FILE" 2>/dev/null)
+    if [[ -n "$sec" ]]; then
+      omarchy plugin enable "$id" --section "$sec" >/dev/null 2>&1 || die "omarchy plugin enable failed"
+    else
+      omarchy plugin enable "$id" >/dev/null 2>&1 || die "omarchy plugin enable failed"
+    fi
+    if [[ "$scene" == "default" ]]; then
+      jq -e --arg i "$id" '(.default | index($i)) == null' "$SCENES_FILE" >/dev/null 2>&1 \
+        && jq --arg i "$id" '.default += [$i]' "$SCENES_FILE" | write_atomic "$SCENES_FILE"
+    else
+      jq -e --arg s "$scene" --arg i "$id" '(.scenes[$s].plugins | index($i)) == null' "$SCENES_FILE" >/dev/null 2>&1 \
+        && jq --arg s "$scene" --arg i "$id" '.scenes[$s].plugins += [$i]' "$SCENES_FILE" | write_atomic "$SCENES_FILE"
+    fi
+  else
+    omarchy plugin disable "$id" >/dev/null 2>&1 || die "omarchy plugin disable failed"
+    if [[ "$scene" == "default" ]]; then
+      jq --arg i "$id" '.default |= map(select(. != $i))' "$SCENES_FILE" | write_atomic "$SCENES_FILE"
+    else
+      jq --arg s "$scene" --arg i "$id" '.scenes[$s].plugins |= map(select(. != $i))' "$SCENES_FILE" | write_atomic "$SCENES_FILE"
+    fi
+  fi
+  # 同步插件位置缓存 + UI 状态文件
+  snapshot_entries "$id"
+  regenerate_ui_state
+  echo "ok"
+}
+
+# 判断插件是否为 omarchy 内置（firstParty）
+plugin_is_first_party() {  # $1 = plugin id
+  omarchy plugin list --json 2>/dev/null | jq -r --arg id "$1" '.[] | select(.id == $id) | (.firstParty == true)' | grep -q true
+}
+
+# 锁定：把 default 场景里的插件加锁 → 所有场景都继承（始终启用）
+# 内置插件：默认锁定（遵循系统默认状态；“锁” = 移出解锁清单）
+cmd_lock() {  # $1 = id
+  require_scenes
+  local id="${1:-}"
+  [[ -n "$id" ]] || die "usage: omarchy-scene lock <plugin-id>"
+  plugin_in_catalog "$id" || die "unknown plugin: $id（run omarchy plugin list）"
+
+  if plugin_is_first_party "$id"; then
+    jq --arg i "$id" '.unlockedBuiltins = ((.unlockedBuiltins // []) | map(select(. != $i)))' "$SCENES_FILE" | write_atomic "$SCENES_FILE"
+    regenerate_ui_state
+    echo "locked $id (omarchy built-in, follows system default)"
+    return 0
+  fi
+  # 确保在 default 清单里
+  jq -e --arg i "$id" '(.default | index($i)) == null' "$SCENES_FILE" >/dev/null 2>&1 \
+    && jq --arg i "$id" '.default += [$i]' "$SCENES_FILE" | write_atomic "$SCENES_FILE"
+  # 加入 locked
+  jq -e --arg i "$id" '(.locked // [] | index($i)) == null' "$SCENES_FILE" >/dev/null 2>&1 \
+    && jq --arg i "$id" '.locked = ((.locked // []) + [$i])' "$SCENES_FILE" | write_atomic "$SCENES_FILE"
+  regenerate_ui_state
+  echo "locked $id (inherited by all scenes, always on)"
+}
+
+cmd_unlock() {  # $1 = id
+  require_scenes
+  local id="${1:-}"
+  [[ -n "$id" ]] || die "usage: omarchy-scene unlock <plugin-id>"
+  if plugin_is_first_party "$id"; then
+    jq --arg i "$id" 'if ((.unlockedBuiltins // []) | index($i)) == null then .unlockedBuiltins += [$i] else . end' "$SCENES_FILE" | write_atomic "$SCENES_FILE"
+    regenerate_ui_state
+    echo "unlocked $id (omarchy built-in — now manageable per scene)"
+    return 0
+  fi
+  jq --arg i "$id" '.locked = ((.locked // []) | map(select(. != $i)))' "$SCENES_FILE" | write_atomic "$SCENES_FILE"
+  regenerate_ui_state
+  echo "unlocked $id"
+}
+
+# 重命名场景 label
+cmd_label() {  # $1 = scene, $2 = label
+  require_scenes
+  local scene="${1:-}" label="${2:-}"
+  [[ -n "$scene" && -n "$label" ]] || die "Usage: omarchy-scene label <scene> <label>"
+  if [[ "$scene" == "default" ]]; then
+    die "the default scene display name is fixed to \"Default\""
+  fi
+  scene_exists "$scene" || die "unknown scene: $scene"
+  [[ ${#label} -le $MAX_NAME_LEN ]] || die "scene label too long (max $MAX_NAME_LEN characters)"
+  jq --arg s "$scene" --arg l "$label" '.scenes[$s].label = $l' "$SCENES_FILE" | write_atomic "$SCENES_FILE"
+  regenerate_ui_state
+  echo "set scene $scene display name to $label"
+}
+
+# 设置/清除场景图标（顶栏显示；空 glyph = 清除）
+cmd_icon() {  # $1 = scene, $2 = glyph
+  require_scenes
+  local scene="${1:-}" glyph="${2:-}"
+  [[ -n "$scene" ]] || die "usage: omarchy-scene icon <scene> <glyph-or-emoji> (empty glyph clears)"
+  scene_exists "$scene" || die "unknown scene: $scene"
+  if [[ -n "$glyph" ]]; then
+    [[ ${#glyph} -le 4 ]] || die "icon too long (max 4 characters)"
+    if [[ "$scene" == "default" ]]; then
+      jq --arg g "$glyph" '.defaultIcon = $g' "$SCENES_FILE" | write_atomic "$SCENES_FILE"
+    else
+      jq --arg s "$scene" --arg g "$glyph" '.scenes[$s].icon = $g' "$SCENES_FILE" | write_atomic "$SCENES_FILE"
+    fi
+  else
+    if [[ "$scene" == "default" ]]; then
+      jq 'del(.defaultIcon)' "$SCENES_FILE" | write_atomic "$SCENES_FILE"
+    else
+      jq --arg s "$scene" 'del(.scenes[$s].icon)' "$SCENES_FILE" | write_atomic "$SCENES_FILE"
+    fi
+  fi
+  regenerate_ui_state
+  echo "set scene $scene icon"
+}
+
+# 重命名场景（key + label）
+cmd_rename() {  # $1 = old, $2 = new
+  require_scenes
+  local old="${1:-}" new="${2:-}"
+  [[ -n "$old" && -n "$new" ]] || die "usage: omarchy-scene rename <old> <new>"
+  scene_exists "$old" || die "unknown scene: $old"
+  [[ "$old" == "default" ]] && die "cannot rename the default scene"
+  [[ "$new" =~ ^[a-zA-Z0-9_-]+$ ]] || die "new scene name may only contain letters/digits/-/_"
+  [[ ${#new} -le $MAX_NAME_LEN ]] || die "new scene name too long (max $MAX_NAME_LEN characters)"
+  [[ "$new" != "$old" ]] || die "new name is the same"
+  scene_exists "$new" && die "scene already exists: $new"
+  jq --arg o "$old" --arg n "$new" '
+    .scenes[$n] = .scenes[$o] |
+    del(.scenes[$o]) |
+    if .current == $o then .current = $n else . end
+  ' "$SCENES_FILE" | write_atomic "$SCENES_FILE"
+  regenerate_ui_state
+  # 刷新顶部栏菜单里的场景条目（幂等）
+  cmd_menu_add >/dev/null 2>&1 || true
+  echo "renamed scene $old -> $new"
+}
+
+# ---------------------------------------------------------------- dispatch
+
+cmd="${1:-}"
+shift || true
+case "$cmd" in
+  help|-h|--help) cmd_help "$@" ;;
+  init) cmd_init "$@" ;;
+  list) cmd_list "$@" ;;
+  current) cmd_current "$@" ;;
+  set) cmd_set "$@" ;;
+  cycle) cmd_cycle "$@" ;;
+  add) cmd_add "$@" ;;
+  rm) cmd_rm "$@" ;;
+  add-plugin) cmd_add_plugin "$@" ;;
+  rm-plugin) cmd_rm_plugin "$@" ;;
+  refresh) cmd_refresh "$@" ;;
+  status) cmd_status "$@" ;;  menu-add) cmd_menu_add "$@" ;;
+  menu-remove) cmd_menu_remove "$@" ;;
+  edit) cmd_edit "$@" ;;
+  bar-status) cmd_bar_status "$@" ;;
+  scenes) cmd_scenes_json "$@" ;;
+  config) cmd_config_json "$@" ;;
+  toggle-plugin) cmd_toggle_plugin "$@" ;;
+  lock) cmd_lock "$@" ;;
+  unlock) cmd_unlock "$@" ;;
+  label) cmd_label "$@" ;;
+  icon) cmd_icon "$@" ;;
+  rename) cmd_rename "$@" ;;
+  *) die "unknown command: $cmd (omarchy-scene help)" ;;
+esac
