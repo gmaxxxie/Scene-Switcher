@@ -51,6 +51,7 @@ die() { echo "omarchy-scene: $*" >&2; exit 1; }
 ensure_config_dir() { mkdir -p "$CONFIG_DIR"; }
 
 require_scenes() {
+  safe_read_json "$SCENES_FILE"
   [[ -f "$SCENES_FILE" ]] || die "not found: $SCENES_FILE — run: omarchy-scene init"
   jq -e '.version == 1' "$SCENES_FILE" >/dev/null 2>&1 \
     || die "invalid $SCENES_FILE (missing version: 1)"
@@ -75,12 +76,71 @@ catalog_kinds() {  # $1 = id -> 逗号分隔 kinds（用于提示，非关键路
   omarchy plugin list --json 2>/dev/null | jq -r --arg id "$1" '.[] | select(.id == $id) | (.kinds | join(","))'
 }
 
-# 原子写文件: 内容通过 stdin 传入，$1 = 目标路径
+# ---- 安全文件助手（防 symlink 重定向 / FIFO 阻塞 / 秒级碰撞 / 并发竞争） ----
+# 拒绝符号链接与非常规文件（常规文件自身归用户所有；攻击面在可被重定向/截断的路径）
+assert_regular_path() {  # $1 = path
+  [[ -z "$1" ]] && return 1
+  [[ -L "$1" ]] && die "refusing symlink: $1"
+  if [[ -e "$1" ]]; then
+    [[ -f "$1" ]] || die "refusing non-regular file: $1"
+  else
+    local dir; dir=$(dirname "$1")
+    [[ -L "$dir" ]] && die "refusing symlinked directory: $dir"
+    [[ -d "$dir" ]] || die "missing directory: $dir"
+  fi
+}
+
+# 有界读取守卫: 拒绝 symlink / 非常规文件 / >8MB；jq 随后按常规方式读原路径
+safe_read_json() {  # $1 = path
+  assert_regular_path "$1"
+  local size; size=$(stat -c %s "$1" 2>/dev/null || echo 0)
+  if (( size > 8388608 )); then
+    die "refusing oversized file: $1 ($size bytes)"
+  fi
+  return 0
+}
+
+# 原子写: 内容经 stdin 传入 -> mktemp 同目录(0600 随机名) -> 权限对齐 -> fsync -> 原子替换
 write_atomic() {
-  local tmp
-  tmp="${1}.tmp.$$"
-  cat > "$tmp"
-  mv "$tmp" "$1"
+  local target="$1" dir tmp oldmode
+  assert_regular_path "$target"
+  dir=$(dirname "$target")
+  [[ -L "$dir" ]] && die "refusing symlinked directory: $dir"
+  tmp=$(mktemp "$dir/.omarchy-scene.XXXXXX") || die "mktemp failed in $dir"
+  if ! cat > "$tmp"; then rm -f "$tmp"; die "write failed: $target"; fi
+  oldmode=$(stat -c %a "$target" 2>/dev/null || echo 600)
+  chmod "$oldmode" "$tmp"
+  sync -f "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$target" || { rm -f "$tmp"; die "replace failed: $target"; }
+  sync -f "$dir" 2>/dev/null || true
+}
+
+# 备份: 随机名 mktemp + 时间戳，杜绝秒级碰撞与可预测路径
+secure_backup() {  # $1 = target -> 输出新备份路径
+  assert_regular_path "$1"
+  local dir ts tmp
+  dir=$(dirname "$1")
+  ts=$(date +%s)
+  tmp=$(mktemp "$dir/.$(basename "$1").bak.$ts.XXXXXX") || die "mktemp failed"
+  cp -a "$1" "$tmp" || { rm -f "$tmp"; die "backup failed: $1"; }
+  echo "$tmp"
+}
+
+# 并发互斥: 变异命令入口调用（flock 独占）
+acquire_lock() {
+  ensure_config_dir
+  local lockf="$CONFIG_DIR/.scenes.lock"
+  [[ -L "$lockf" ]] && die "refusing symlinked lock file: $lockf"
+  # 注意: 无命令的 exec 重定向会常驻当前 shell（2>/dev/null 会把后续所有 stderr 吞掉），
+  # 因此这里不附加 stderr 重定向，失败由 bash 自身报错 + die 兜底
+  if ! exec 9>>"$lockf"; then
+    die "cannot open lock file: $lockf"
+  fi
+  flock -n 9 || die "another omarchy-scene operation is running (lock: $lockf)"
+}
+
+release_lock() {
+  flock -u 9 2>/dev/null || true
 }
 
 reload_shell() {
@@ -98,6 +158,7 @@ snapshot_entries() {
   [[ $# -eq 0 ]] && return 0
   local ids_json new_snap
   ids_json=$(printf '%s\n' "$@" | jq -R . | jq -s .)
+  safe_read_json "$SHELL_JSON"
   new_snap=$(jq -n \
     --argjson shell "$(cat "$SHELL_JSON")" \
     --argjson ids "$ids_json" '
@@ -124,10 +185,10 @@ snapshot_entries() {
   [[ -z "$new_snap" || "$new_snap" == "null" ]] && return 0
   ensure_config_dir
   if [[ -f "$ENTRIES_FILE" ]]; then
-    jq -s '.[0] * .[1]' "$ENTRIES_FILE" <(printf '%s\n' "$new_snap") > "${ENTRIES_FILE}.tmp" \
-      && mv "${ENTRIES_FILE}.tmp" "$ENTRIES_FILE"
+    safe_read_json "$ENTRIES_FILE"
+    jq -s '.[0] * .[1]' "$ENTRIES_FILE" <(printf '%s\n' "$new_snap") | write_atomic "$ENTRIES_FILE"
   else
-    printf '%s\n' "$new_snap" > "$ENTRIES_FILE"
+    printf '%s\n' "$new_snap" | write_atomic "$ENTRIES_FILE"
   fi
 }
 
@@ -258,7 +319,8 @@ cmd_init() {
     die "$SCENES_FILE already exists (use --force to overwrite; the old file is backed up)"
   fi
   ensure_config_dir
-  [[ -f "$SCENES_FILE" ]] && cp "$SCENES_FILE" "${SCENES_FILE}.bak.$(date +%s)"
+  acquire_lock
+  [[ -f "$SCENES_FILE" ]] && secure_backup "$SCENES_FILE" >/dev/null
 
   local ids
   ids=$(jq -r '[.bar.layout.left[], .bar.layout.center[], .bar.layout.right[], .plugins[]] | map(.id) | unique | .[]' "$SHELL_JSON")
@@ -329,6 +391,7 @@ cmd_set() {  # $1 = scene, $2 = --dry-run
   [[ ${2:-} == "--dry-run" ]] && dry=1
   scene_exists "$scene" || die "unknown scene: '$scene' (available: $(jq -r '.scenes | keys | join(", ")' "$SCENES_FILE"))"
 
+  acquire_lock
   local managed targets
   managed=$(managed_ids "$SCENES_FILE")
   targets=$(target_ids "$scene")
@@ -380,10 +443,10 @@ cmd_set() {  # $1 = scene, $2 = --dry-run
   fi
 
   # 3) 备份 + 原子写
-  cp "$SHELL_JSON" "$SHELL_JSON.bak.scene.$(date +%s)"
-  cat "$tmp_shell" > "${SHELL_JSON}.tmp"
-  jq -e . "${SHELL_JSON}.tmp" >/dev/null || { rm -f "${SHELL_JSON}.tmp" "$tmp_shell"; die "transform produced invalid JSON, write aborted"; }
-  mv "${SHELL_JSON}.tmp" "$SHELL_JSON"
+  safe_read_json "$SHELL_JSON"
+  secure_backup "$SHELL_JSON" >/dev/null
+  jq -e . "$tmp_shell" >/dev/null || { rm -f "$tmp_shell"; die "transform produced invalid JSON, write aborted"; }
+  cat "$tmp_shell" | write_atomic "$SHELL_JSON"
   rm -f "$tmp_shell"
 
   # 4) 记录当前场景
@@ -420,6 +483,7 @@ MAX_NAME_LEN=10
 
 cmd_add() {  # $1 = name, --label, --icon
   require_scenes
+  acquire_lock
   local name="${1:-}"; local label="" icon=""
   [[ -n "$name" ]] || die "usage: omarchy-scene add <name> [--label <label>] [--icon <glyph>]"
   shift
@@ -450,6 +514,7 @@ cmd_add() {  # $1 = name, --label, --icon
 
 cmd_rm() {
   require_scenes
+  acquire_lock
   local name="${1:-}"
   [[ -n "$name" ]] || die "Usage: omarchy-scene rm <name>"
   scene_exists "$name" || die "unknown scene: $name"
@@ -461,6 +526,7 @@ cmd_rm() {
 
 cmd_add_plugin() {  # $1 = scene, $2 = id（scene 可为 default）
   require_scenes
+  acquire_lock
   local scene="${1:-}" id="${2:-}"
   [[ -n "$scene" && -n "$id" ]] || die "Usage: omarchy-scene add-plugin <scene|default> <plugin-id>"
   scene_exists "$scene" || die "unknown scene: $scene"
@@ -484,6 +550,7 @@ cmd_add_plugin() {  # $1 = scene, $2 = id（scene 可为 default）
 
 cmd_rm_plugin() {  # $1 = scene, $2 = id（scene 可为 default）
   require_scenes
+  acquire_lock
   local scene="${1:-}" id="${2:-}"
   [[ -n "$scene" && -n "$id" ]] || die "Usage: omarchy-scene rm-plugin <scene|default> <plugin-id>"
   scene_exists "$scene" || die "unknown scene: $scene"
@@ -502,6 +569,7 @@ cmd_rm_plugin() {  # $1 = scene, $2 = id（scene 可为 default）
 
 cmd_refresh() {
   require_scenes
+  acquire_lock
   local managed; managed=$(managed_ids "$SCENES_FILE")
   snapshot_entries $(jq -r '.[]' <<<"$managed")
   regenerate_ui_state
@@ -533,6 +601,7 @@ cmd_status() {
 
 cmd_menu_add() {
   require_scenes
+  acquire_lock
   # 生成 JSONC 块: scenes 子菜单 + 每个场景一行（嵌套 id: scenes.<name>）
   # 注意: 用 jq -r + tostring 保留内部转义（如 checked 里的 \"）；block 写入临时文件供 awk 读取，
   #       避免经 awk -v 传参时反斜杠被解释。
@@ -540,9 +609,11 @@ cmd_menu_add() {
   blockfile=$(mktemp)
   jq -r '
     [["scenes", {icon: "󰕮", label: "Scenes"}]] +
-    [.scenes | to_entries[] | ["scenes." + .key, {icon: "", label: (.value.label // .key),
-       checked: ("test \"$(omarchy-scene current 2>/dev/null)\" = " + .key),
-       action: ("omarchy-scene set " + .key)}]]
+    [.scenes | to_entries[] |
+      select(.key | test("^[a-zA-Z0-9_-]{1,10}$")) |
+      ["scenes." + .key, {icon: ((.value.icon // "")[0:4]), label: ((.value.label // .key)[0:10]),
+        checked: ("test \"$(omarchy-scene current 2>/dev/null)\" = '"'"'" + .key + "'"'"'"),
+        action: ("omarchy-scene set '"'"'" + .key + "'"'"'")}]]
     | .[]
     | "\"" + .[0] + "\": " + (.[1] | tostring)
   ' "$SCENES_FILE" | paste -sd, - | sed 's/^/  /' > "$blockfile"
@@ -579,13 +650,14 @@ cmd_menu_add() {
 }
 
 cmd_menu_remove() {
+  safe_read_json "$MENU_FILE"
   [[ -f "$MENU_FILE" ]] || die "not found: $MENU_FILE"
   if grep -qF "$MENU_MARK_BEGIN" "$MENU_FILE"; then
     awk -v begin="$MENU_MARK_BEGIN" -v end="$MENU_MARK_END" '
       index($0, begin) { skip=1; next }
       index($0, end)   { skip=0; next }
       !skip { print }
-    ' "$MENU_FILE" > "${MENU_FILE}.tmp" && mv "${MENU_FILE}.tmp" "$MENU_FILE"
+    ' "$MENU_FILE" | write_atomic "$MENU_FILE"
     echo "removed the Scenes submenu"
   else
     echo "no Scenes submenu marker found ($MENU_FILE)"
@@ -639,15 +711,18 @@ config_payload() {
     (.scenes // {}) as $scn |
     (.locked // []) as $lock |
     (.unlockedBuiltins // []) as $unlocked |
-    (.current // "default") as $c |
+    (.current // "default") as $c0 |
     (.defaultIcon // "") as $dIcon |
     ($cat | map(select(.firstParty == true) | .id)) as $fp |
+    ($cat | map(select(.id | test("^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$")))) as $catb |
+    ($scn | keys | map(select(test("^[a-zA-Z0-9_-]{1,10}$")))) as $snames |
+    ($c0 | select(test("^[a-zA-Z0-9_-]{1,10}$")) // "default") as $c |
     { current: $c,
       scenes: (
-        (["default"] + ($scn | keys)) | map(. as $n |
+        (["default"] + $snames) | map(. as $n |
           { name: $n,
-            icon: (if $n == "default" then $dIcon else ((($scn[$n].icon) // "")) end),
-            label: (if $n == "default" then "Default" else (($scn[$n].label // $n)) end),
+            icon: (if $n == "default" then ($dIcon[0:4]) else ((($scn[$n].icon) // "")[0:4]) end),
+            label: (if $n == "default" then "Default" else ((($scn[$n].label // $n)[0:10])) end),
             active: ($n == $c),
             lockedCount: ($lock | length),
             count: (if $n == "default"
@@ -655,7 +730,7 @@ config_payload() {
                     else (($scn[$n].plugins // []) | map(select(. as $id | ($fp | index($id)) == null)) | length) end) })
       ),
       plugins: (
-        (($cat | map(select(.firstParty != true))) + ($cat | map(select(.firstParty == true))))
+        (($catb | map(select(.firstParty != true))) + ($catb | map(select(.firstParty == true))))
         | map(. as $pl |
           { id: $pl.id, name: $pl.name, kinds: $pl.kinds,
             enabled: ($pl.enabled == true),
@@ -673,12 +748,14 @@ cmd_config_json() { require_scenes; config_payload; }
 
 # 把合并数据写进 ui-state.json，供 bar 组件 FileView 监听实时刷新
 regenerate_ui_state() {
-  config_payload > "${UI_STATE_FILE}.tmp" && mv "${UI_STATE_FILE}.tmp" "$UI_STATE_FILE"
+  safe_read_json "$SCENES_FILE"
+  config_payload | write_atomic "$UI_STATE_FILE"
 }
 
 # 配置面板用：切换插件开关（on/off）——内部就是 omarchy plugin enable/disable，并同步场景清单
 cmd_toggle_plugin() {  # $1 = scene, $2 = id, $3 = on|off
   require_scenes
+  acquire_lock
   local scene="${1:-}" id="${2:-}" state="${3:-}"
   [[ -n "$scene" && -n "$id" ]] || die "usage: omarchy-scene toggle-plugin <scene> <id> on|off"
   scene_exists "$scene" || die "unknown scene: $scene"
@@ -723,6 +800,7 @@ plugin_is_first_party() {  # $1 = plugin id
 # 内置插件：默认锁定（遵循系统默认状态；“锁” = 移出解锁清单）
 cmd_lock() {  # $1 = id
   require_scenes
+  acquire_lock
   local id="${1:-}"
   [[ -n "$id" ]] || die "usage: omarchy-scene lock <plugin-id>"
   plugin_in_catalog "$id" || die "unknown plugin: $id（run omarchy plugin list）"
@@ -745,6 +823,7 @@ cmd_lock() {  # $1 = id
 
 cmd_unlock() {  # $1 = id
   require_scenes
+  acquire_lock
   local id="${1:-}"
   [[ -n "$id" ]] || die "usage: omarchy-scene unlock <plugin-id>"
   if plugin_is_first_party "$id"; then
@@ -761,6 +840,7 @@ cmd_unlock() {  # $1 = id
 # 重命名场景 label
 cmd_label() {  # $1 = scene, $2 = label
   require_scenes
+  acquire_lock
   local scene="${1:-}" label="${2:-}"
   [[ -n "$scene" && -n "$label" ]] || die "Usage: omarchy-scene label <scene> <label>"
   if [[ "$scene" == "default" ]]; then
@@ -776,6 +856,7 @@ cmd_label() {  # $1 = scene, $2 = label
 # 设置/清除场景图标（顶栏显示；空 glyph = 清除）
 cmd_icon() {  # $1 = scene, $2 = glyph
   require_scenes
+  acquire_lock
   local scene="${1:-}" glyph="${2:-}"
   [[ -n "$scene" ]] || die "usage: omarchy-scene icon <scene> <glyph-or-emoji> (empty glyph clears)"
   scene_exists "$scene" || die "unknown scene: $scene"
