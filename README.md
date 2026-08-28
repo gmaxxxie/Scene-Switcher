@@ -7,6 +7,12 @@ Scenes let you switch your bar/plugin set by occasion — Development at a
 cafe, Focus at a desk — with one click or keypress instead of editing
 `shell.json` every time.
 
+## Screenshots
+
+![Scene switch popup](screenshots/scene-popup.png)
+
+![Configuration panel](screenshots/scene-config-panel.png)
+
 ## Features
 
 - **Bar widget** — current scene icon + label; left click opens the switch popup
