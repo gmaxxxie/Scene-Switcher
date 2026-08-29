@@ -397,9 +397,19 @@ d = json.load(open(p))
 d["scenes"]["s1"] = {"label": "x" * 100, "plugins": []}
 json.dump(d, open(p, "w"))
 PY
-  expect_fail "label >10 → config 拒绝" "$SCENE" config
-  expect_fail "label >10 → scenes 拒绝" "$SCENE" scenes
-  expect_fail "label >10 → current 拒绝" "$SCENE" current
+  expect_fail "label >64 → config 拒绝" "$SCENE" config
+  expect_fail "label >64 → scenes 拒绝" "$SCENE" scenes
+  expect_fail "label >64 → current 拒绝" "$SCENE" current
+
+  # 9a2. 长但合理的 label（如 "Development"=11 字符）必须被接受
+  python3 - "$OMARCHY_SCENES_DIR/scenes.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+d["scenes"]["s1"] = {"label": "Development", "plugins": []}
+json.dump(d, open(p, "w"))
+PY
+  expect "label=Development(11字符) → config 通过" "$SCENE" config
 
   # 9b. 场景数超限
   python3 - "$OMARCHY_SCENES_DIR/scenes.json" <<'PY'
@@ -566,6 +576,82 @@ t12_roundtrip() {
   echo "  (T12 done)"
 }
 
+# ---------------------------------------------------------------- T13 布局稳定性
+
+# 模拟用户真实故障: 未受管内置部件（wifi/ai/audio/monitor/power）不随场景切换漂移，
+# 每个场景的完整布局在反复 default<->dev 切换中精确还原。
+
+t13_layout_stability() {
+  echo "T13 场景切换布局稳定（未受管内置部件不被挤走）"
+  setup_env
+  export HOME="$WORK/home" OMARCHY_SCENES_DIR="$WORK/cfg/scenes" PATH="$WORK/bin:$PATH"
+  # 丰富版目录（真实形态: 内置 bar-widget + 用户 bar-widget/service）
+  cat > "$WORK/bin/omarchy" <<SH
+#!/usr/bin/env bash
+case "\$1 \$2" in
+  "plugin list")
+    cat <<'J'
+[{"id":"omarchy.tray","name":"Tray","kinds":["bar-widget"],"enabled":true,"firstParty":true},
+ {"id":"omarchy.menu","name":"Menu","kinds":["bar-widget"],"enabled":true,"firstParty":true},
+ {"id":"omarchy.workspaces","name":"Workspaces","kinds":["bar-widget"],"enabled":true,"firstParty":true},
+ {"id":"omarchy.clock","name":"Clock","kinds":["bar-widget"],"enabled":true,"firstParty":true},
+ {"id":"omarchy.keyboard-layout","name":"Keyboard layout","kinds":["bar-widget"],"enabled":true,"firstParty":true},
+ {"id":"omarchy.bluetooth","name":"Bluetooth","kinds":["bar-widget"],"enabled":true,"firstParty":true},
+ {"id":"omarchy.agents","name":"AI agents","kinds":["bar-widget"],"enabled":true,"firstParty":true},
+ {"id":"omarchy.network","name":"WiFi","kinds":["bar-widget"],"enabled":true,"firstParty":true},
+ {"id":"omarchy.audio","name":"Audio","kinds":["bar-widget"],"enabled":true,"firstParty":true},
+ {"id":"omarchy.monitor","name":"Monitor","kinds":["bar-widget"],"enabled":true,"firstParty":true},
+ {"id":"omarchy.power","name":"Power","kinds":["bar-widget"],"enabled":true,"firstParty":true},
+ {"id":"saif.system-stats","name":"System stats","kinds":["bar-widget"],"enabled":true,"firstParty":false},
+ {"id":"local.opencode-go","name":"Opencode","kinds":["bar-widget"],"enabled":true,"firstParty":false},
+ {"id":"io.github.ilyazar.syncthing","name":"Syncthing","kinds":["service","bar-widget"],"enabled":true,"firstParty":false},
+ {"id":"max.scene","name":"Scene Switcher","kinds":["bar-widget"],"enabled":true,"firstParty":false},
+ {"id":"gmaxxxie.fcitx5-theme","name":"Fcitx5 theme","kinds":["service"],"enabled":true,"firstParty":false},
+ {"id":"b.okomart","name":"Okomart","kinds":["service","panel"],"enabled":true,"firstParty":false}]
+J
+    ;;
+  plugin\ enable*) exit 0 ;;
+  plugin\ disable*) exit 0 ;;
+  *) exit 0 ;;
+esac
+SH
+  chmod +x "$WORK/bin/omarchy"
+  # 用户真实形态的 shell.json（dev 时代布局: 未受管内置部件 + 场景部件按缓存索引散布）
+  cat > "$WORK/home/.config/omarchy/shell.json" <<'JSON'
+{"version":1,"bar":{"layout":{
+  "left":[{"id":"omarchy.menu"},{"id":"omarchy.workspaces"},{"id":"max.scene"}],
+  "center":[{"id":"omarchy.clock"}],
+  "right":[{"id":"omarchy.tray"},{"id":"saif.system-stats"},{"id":"omarchy.keyboard-layout"},{"id":"omarchy.bluetooth"},{"id":"omarchy.agents"},{"id":"omarchy.network"},{"id":"io.github.ilyazar.syncthing"},{"id":"local.opencode-go"},{"id":"omarchy.audio"},{"id":"omarchy.monitor"},{"id":"omarchy.power"}]}},"plugins":[{"id":"gmaxxxie.fcitx5-theme"},{"id":"b.okomart"},{"id":"max.keyboard-layout"}],"disabledPlugins":[]}
+JSON
+  # 场景定义: default+locked（含幽灵 id max.keyboard-layout），dev 场景（label 11 字符）
+  cat > "$OMARCHY_SCENES_DIR/scenes.json" <<'JSON'
+{"version":1,"current":"dev","default":["gmaxxxie.fcitx5-theme","b.okomart","max.scene","max.keyboard-layout"],"locked":["gmaxxxie.fcitx5-theme","b.okomart","max.scene","max.keyboard-layout"],"unlockedBuiltins":[],"scenes":{"dev":{"label":"Development","plugins":["local.opencode-go","saif.system-stats","b.okomart","io.github.ilyazar.syncthing"]},"focus":{"label":"Focus","plugins":["slcode777.tomato-timer"]}}}
+JSON
+  # 场景部件的历史位置缓存（含未受管部件的陈旧条目——真实数据里就有）
+  cat > "$OMARCHY_SCENES_DIR/entries.json" <<'JSON'
+{"saif.system-stats":{"section":"right","index":1,"entry":{"id":"saif.system-stats"}},"io.github.ilyazar.syncthing":{"section":"right","index":6,"entry":{"id":"io.github.ilyazar.syncthing"}},"local.opencode-go":{"section":"right","index":7,"entry":{"id":"local.opencode-go"}},"omarchy.network":{"section":"right","index":5,"entry":{"id":"omarchy.network"}}}
+JSON
+  rightorder() { jq -r '.bar.layout.right | map(.id) | join(",")' "$WORK/home/.config/omarchy/shell.json"; }
+  wifi() { jq -r '.bar.layout.right | to_entries[] | select(.value.id == "omarchy.agents" or .value.id == "omarchy.network" or .value.id == "omarchy.audio" or .value.id == "omarchy.monitor" or .value.id == "omarchy.power") | "\(.value.id)=\(.key)"' "$WORK/home/.config/omarchy/shell.json" | paste -sd' ' -; }
+  DEV_WANT="omarchy.tray,saif.system-stats,omarchy.keyboard-layout,omarchy.bluetooth,omarchy.agents,omarchy.network,io.github.ilyazar.syncthing,local.opencode-go,omarchy.audio,omarchy.monitor,omarchy.power"
+  DEF_WANT="omarchy.tray,omarchy.keyboard-layout,omarchy.bluetooth,omarchy.agents,omarchy.network,omarchy.audio,omarchy.monitor,omarchy.power"
+  stable=1
+  for i in 1 2 3; do
+    "$SCENE" set default >/dev/null 2>&1 || { bad "set default 失败 (cycle $i)"; stable=0; break; }
+    [[ "$(rightorder)" == "$DEF_WANT" ]] || { bad "default 布局漂移 (cycle $i): $(rightorder)"; stable=0; break; }
+    "$SCENE" set dev >/dev/null 2>&1 || { bad "set dev 失败 (cycle $i)"; stable=0; break; }
+    [[ "$(rightorder)" == "$DEV_WANT" ]] || { bad "dev 布局漂移 (cycle $i): $(rightorder)"; stable=0; break; }
+    # wifi/ai/audio/monitor/power 位置逐轮必须完全一致
+    [[ "$(wifi)" == "omarchy.agents=4 omarchy.network=5 omarchy.audio=8 omarchy.monitor=9 omarchy.power=10" ]] \
+      || { bad "内置部件被挤走 (cycle $i): $(wifi)"; stable=0; break; }
+  done
+  if [[ $stable -eq 1 ]]; then ok "3 轮 default<->dev: 布局逐轮精确还原，wifi/ai/audio/monitor/power 原地不动"; fi
+  expect "_layouts 已写入 scenes.json" sh -c "jq -e '._layouts.dev and ._layouts.default' '$OMARCHY_SCENES_DIR/scenes.json' >/dev/null"
+  expect "dev 长 label 保留" sh -c "[ \"\$(jq -r .scenes.dev.label '$OMARCHY_SCENES_DIR/scenes.json')\" = Development ]"
+  expect "config 输出正常" "$SCENE" config
+  echo "  (T13 done)"
+}
+
 # ---------------------------------------------------------------- 汇总
 
 summary() {
@@ -593,4 +679,5 @@ t09_limits
 t10_hygiene
 t11_lock
 t12_roundtrip
+t13_layout_stability
 summary

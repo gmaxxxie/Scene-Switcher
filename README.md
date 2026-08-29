@@ -120,11 +120,15 @@ All file I/O is **descriptor-bound** — there is no check-then-open anywhere:
 - Structural limits are enforced on the validated read before anything is
   emitted to QML: 8 MiB byte cap, JSON depth ≤ 32, strings ≤ 4096 chars,
   array/object member counts ≤ 65536; `scenes.json` — at most 12 scenes,
-  scene keys/labels ≤ 10 chars (`[a-zA-Z0-9_-]`), icons ≤ 4 chars, plugin
-  lists ≤ 256 entries, plugin ids `^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`;
-  `entries.json` ≤ 4096 records; catalog-derived fields (`name` ≤ 128,
-  `id` ≤ 64, `kinds` ≤ 16×32); menu actions are bounded by the scene-key
-  limit.
+  scene keys ≤ 10 chars (`[a-zA-Z0-9_-]`), labels ≤ 64 chars, icons ≤ 4
+  chars, plugin lists ≤ 256 entries, plugin ids
+  `^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`; `entries.json` ≤ 4096 records;
+  catalog-derived fields (`name` ≤ 128, `id` ≤ 64, `kinds` ≤ 16×32); menu
+  actions are bounded by the scene-key limit.
+- Each scene remembers its exact bar layout (`_layouts` snapshots), so
+  switching default ↔ dev restores the arrangement precisely every time and
+  unmanaged built-in widgets (wifi/ai/audio/monitor/power, …) are never
+  pushed out of place by index drift.
 
 ## Development
 
@@ -134,7 +138,7 @@ deploy (the shell hot-reloads on save):
 
 ```sh
 ./sync.sh          # copy the runtime files to the live folder
-bash tests/run-tests.sh   # security/regression suite (92 checks)
+bash tests/run-tests.sh   # security/regression suite (97 checks)
 omarchy plugin validate .   # spec validation before pushing
 ```
 

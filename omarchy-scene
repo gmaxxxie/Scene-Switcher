@@ -53,9 +53,12 @@
 #     the QML panel (see MAX_* in the embedded secure I/O core):
 #        - byte limit: 8 MiB (kept), JSON depth <= 32, string <= 4096 chars,
 #          array/object member count <= 65536 (generic)
-#        - scenes.json: at most 12 scenes, scene keys/labels <= 10 chars [a-zA-Z0-9_-],
+#        - scenes.json: at most 12 scenes, scene keys <= 10 chars [a-zA-Z0-9_-], labels <= 64 chars,
 #          icons <= 4 chars, plugin lists <= 256 entries, plugin ids
-#          ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$
+#          ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$; _layouts.<scene> full-layout snapshots are
+#          validated with the same caps. Layout snapshots let scene switches restore the
+#          exact previous bar arrangement, so unmanaged built-in widgets (wifi/ai/audio/...)
+#          are never displaced by index drift.
 #        - entries.json: <= 4096 records, keys are plugin ids
 #        - catalog-derived fields (fed to QML): name <= 128, id <= 64, kinds <= 16 x 32
 #        - menu command/action lengths are bounded by the scene-key limit (<= 10 chars)
@@ -76,7 +79,8 @@ SHELL_RELOAD_CMD="omarchy-shell -q shell reloadConfig"
 
 # 管理上限（cmd_add 等命令在写入前本地强制）
 MAX_SCENES=5
-MAX_NAME_LEN=10
+MAX_NAME_LEN=10                   # 场景名 key（进入菜单命令/检查字符串，必须小而严格）
+MAX_LABEL_LEN=64                  # 场景显示名 label（显示字段，容忍较长文案）
 
 # ---------------------------------------------------------------- helpers
 
@@ -109,6 +113,7 @@ MAX_ITEMS      = 65536             # 通用数组/对象成员数上限
 MAX_WRITE      = 32 * 1024 * 1024  # 写内容上限（防御性；写入内容均来自本脚本内部管道）
 MAX_SCENES_DOC = 12                # scenes.json 自定义场景数上限（管理上限 5 + 余量）
 MAX_LIST       = 256               # scenes.json 各插件列表长度上限
+MAX_LABEL_LEN  = 64                # 场景显示名（label）上限（显示字段，放宽到 64；场景名 key 仍 <=10）
 MAX_ENTRIES    = 4096              # entries.json 记录数上限
 NAME_RE = re.compile(r"^[A-Za-z0-9_\-]{1,10}$")
 ID_RE   = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-]{0,63}$")
@@ -240,8 +245,8 @@ def check_scenes(doc, path):
             fail("%s: invalid scene name %r (a-zA-Z0-9_- <=10 chars)" % (path, name))
         if not isinstance(sc, dict):
             fail("%s: scene %r must be an object" % (path, name))
-        if "label" in sc and (not isinstance(sc["label"], str) or len(sc["label"]) > 10):
-            fail("%s: scene %r label too long (max 10)" % (path, name))
+        if "label" in sc and (not isinstance(sc["label"], str) or len(sc["label"]) > MAX_LABEL_LEN):
+            fail("%s: scene %r label too long (max %d)" % (path, name, MAX_LABEL_LEN))
         if "icon" in sc and (not isinstance(sc["icon"], str) or len(sc["icon"]) > 4):
             fail("%s: scene %r icon too long (max 4)" % (path, name))
         plugs = sc.get("plugins", [])
@@ -250,6 +255,26 @@ def check_scenes(doc, path):
         for x in plugs:
             if not isinstance(x, str) or not ID_RE.match(x):
                 fail("%s: invalid plugin id in scene %r: %r" % (path, name, x))
+    if "_layouts" in doc:
+        # 场景布局快照（_layouts.<scene> = {left,center,right} 部件数组）——内部记忆字段，同样受限
+        lays = doc["_layouts"]
+        if not isinstance(lays, dict) or len(lays) > MAX_SCENES_DOC + 1:
+            fail("%s: _layouts must be an object with at most %d scenes" % (path, MAX_SCENES_DOC + 1))
+        for sname, secs in lays.items():
+            if not NAME_RE.match(sname):
+                fail("%s: invalid _layouts scene key %r" % (path, sname))
+            if not isinstance(secs, dict):
+                fail("%s: _layouts[%r] must be an object" % (path, sname))
+            for sect in ("left", "center", "right"):
+                arr = secs.get(sect, [])
+                if not isinstance(arr, list) or len(arr) > MAX_LIST:
+                    fail("%s: _layouts[%r].%s invalid (array <= %d)" % (path, sname, sect, MAX_LIST))
+                for w in arr:
+                    if not isinstance(w, dict):
+                        fail("%s: _layouts[%r].%s entry must be an object" % (path, sname, sect))
+                    wid = w.get("id")
+                    if not isinstance(wid, str) or len(wid) > 64:
+                        fail("%s: _layouts[%r].%s widget id invalid" % (path, sname, sect))
 
 def check_entries(doc, path):
     if not isinstance(doc, dict) or len(doc) > MAX_ENTRIES:
@@ -764,7 +789,7 @@ cmd_init() {
   acquire_lock
   [[ -f "$SCENES_FILE" ]] && secure_backup "$SCENES_FILE" >/dev/null
 
-  local ids ids_json default_json shell_doc
+  local ids ids_json default_json shell_doc init_layout
   shell_doc=$(safe_read_json "$SHELL_JSON")
   ids=$(jq -r '[.bar.layout.left[], .bar.layout.center[], .bar.layout.right[], .plugins[]] | map(.id) | unique | .[]' <<<"$shell_doc")
   [[ -n "$ids" ]] || die "no manageable plugin entries in shell.json"
@@ -774,8 +799,9 @@ cmd_init() {
 
   ids_json=$(printf '%s\n' "$ids" | jq -R . | jq -s .)
   default_json=$(printf '%s\n' "$ids" | jq -R . | jq -s .)
+  init_layout=$(jq -c '.bar.layout // {left: [], center: [], right: []}' <<<"$shell_doc")
 
-  jq -n --argjson default "$default_json" '
+  jq -n --argjson default "$default_json" --argjson layout "$init_layout" '
     {
       version: 1,
       current: "default",
@@ -783,7 +809,8 @@ cmd_init() {
       default: $default,
       locked: [],
       unlockedBuiltins: [],
-      scenes: {}
+      scenes: {},
+      _layouts: { default: $layout }
     }
   ' | write_atomic "$SCENES_FILE"
   regenerate_ui_state
@@ -846,6 +873,19 @@ cmd_set() {  # $1 = scene, $2 = --dry-run
 
   # 2) 计算前后启用状态，生成 diff（shell 文档只经已验证内容，无路径重开）
   shell_doc=$(safe_read_json "$SHELL_JSON")
+  # 2a) 记录“离开前”场景的完整布局快照（含未受管内置部件如 wifi/ai/audio）；
+  #     下一次再进入该场景时用它精确还原，避免按缓存索引增量插入造成的部件漂移。
+  local cur_scene cur_layout cached_layout seeded_shell
+  cur_scene=$(jq -r '.current // "default"' <<<"$SCENES_DOC")
+  cur_layout=$(jq -c '.bar.layout // {left: [], center: [], right: []}' <<<"$shell_doc")
+  # 2b) 若目标场景已有布局快照，则以其为起始布局再跑 transform（快照里的受管部件已就位，
+  #     insert_widget 全部 no-op，未受管内置部件保持在快照位置，成员关系仍由 transform 强制）
+  cached_layout=$(jq -r --arg s "$scene" '._layouts[$s] // null' <<<"$SCENES_DOC")
+  if [[ "$cached_layout" != "null" && -n "$cached_layout" ]]; then
+    seeded_shell=$(jq --argjson lay "$cached_layout" '.bar.layout = $lay' <<<"$shell_doc")
+  else
+    seeded_shell="$shell_doc"
+  fi
   before=$(enabled_map "$catalog" <<<"$shell_doc")
   local cache_doc
   cache_doc=$(secure_io read-maybe entries "$ENTRIES_FILE" 2>/dev/null) || cache_doc="{}"
@@ -854,7 +894,7 @@ cmd_set() {  # $1 = scene, $2 = --dry-run
     --argjson managed "$managed" \
     --argjson cache "$cache_doc" \
     --argjson catalog "$catalog" \
-    <<<"$shell_doc")
+    <<<"$seeded_shell")
   after=$(enabled_map "$catalog" <<<"$new_shell")
 
   # diff 报告
@@ -886,8 +926,9 @@ cmd_set() {  # $1 = scene, $2 = --dry-run
   secure_backup "$SHELL_JSON" >/dev/null
   printf '%s\n' "$new_shell" | write_atomic "$SHELL_JSON"
 
-  # 4) 记录当前场景
-  jq --arg s "$scene" '.current = $s' <<<"$SCENES_DOC" | write_atomic "$SCENES_FILE"
+  # 4) 记录当前场景 + 离开前场景的布局快照（单次原子写；下次进入该场景时精确还原）
+  jq --arg c "$cur_scene" --arg s "$scene" --argjson lay "$cur_layout" \
+    '.current = $s | ._layouts[$c] = $lay' <<<"$SCENES_DOC" | write_atomic "$SCENES_FILE"
   regenerate_ui_state
 
   reload_shell
@@ -933,7 +974,7 @@ cmd_add() {  # $1 = name, --label, --icon
   [[ $name =~ ^[a-zA-Z0-9_-]+$ ]] || die "scene name may only contain letters/digits/-/_"
   [[ ${#name} -le $MAX_NAME_LEN ]] || die "scene name too long (max $MAX_NAME_LEN characters)"
   [[ -z "$label" ]] && label="$name"
-  [[ ${#label} -le $MAX_NAME_LEN ]] || die "scene label too long (max $MAX_NAME_LEN characters)"
+  [[ ${#label} -le $MAX_LABEL_LEN ]] || die "scene label too long (max $MAX_LABEL_LEN characters)"
   [[ ${#icon} -le 4 ]] || die "scene icon too long (max 4 characters)"
   local n
   n=$(jq -r '.scenes | length' <<<"$SCENES_DOC")
@@ -954,7 +995,7 @@ cmd_rm() {
   require_scenes
   scene_exists "$name" || die "unknown scene: $name"
   [[ "$(jq -r '.current' <<<"$SCENES_DOC")" == "$name" ]] && die "cannot delete the current scene (switch first: omarchy-scene set <other>)"
-  jq --arg n "$name" 'del(.scenes[$n])' <<<"$SCENES_DOC" | write_atomic "$SCENES_FILE"
+  jq --arg n "$name" 'del(.scenes[$n]) | del(._layouts[$n]?)' <<<"$SCENES_DOC" | write_atomic "$SCENES_FILE"
   regenerate_ui_state
   echo "deleted scene $name"
 }
@@ -1042,7 +1083,7 @@ menu_block() {
     [["scenes", {icon: "󰕮", label: "Scenes"}]] +
     [.scenes | to_entries[] |
       select(.key | test("^[a-zA-Z0-9_-]{1,10}$")) |
-      ["scenes." + .key, {icon: ((.value.icon // "")[0:4]), label: ((.value.label // .key)[0:10]),
+      ["scenes." + .key, {icon: ((.value.icon // "")[0:4]), label: ((.value.label // .key)[0:64]),
         checked: ("test \"$(omarchy-scene current 2>/dev/null)\" = '"'"'" + .key + "'"'"'"),
         action: ("omarchy-scene set '"'"'" + .key + "'"'"'")}]]
     | .[]
@@ -1197,7 +1238,7 @@ config_payload() {
         (["default"] + $snames) | map(. as $n |
           { name: $n,
             icon: (if $n == "default" then ($dIcon[0:4]) else ((($scn[$n].icon) // "")[0:4]) end),
-            label: (if $n == "default" then "Default" else ((($scn[$n].label // $n)[0:10])) end),
+            label: (if $n == "default" then "Default" else ((($scn[$n].label // $n)[0:64])) end),
             active: ($n == $c),
             lockedCount: ($lock | length),
             count: (if $n == "default"
@@ -1327,7 +1368,7 @@ cmd_label() {  # $1 = scene, $2 = label
     die "the default scene display name is fixed to \"Default\""
   fi
   scene_exists "$scene" || die "unknown scene: $scene"
-  [[ ${#label} -le $MAX_NAME_LEN ]] || die "scene label too long (max $MAX_NAME_LEN characters)"
+  [[ ${#label} -le $MAX_LABEL_LEN ]] || die "scene label too long (max $MAX_LABEL_LEN characters)"
   jq --arg s "$scene" --arg l "$label" '.scenes[$s].label = $l' <<<"$SCENES_DOC" | write_atomic "$SCENES_FILE"
   regenerate_ui_state
   echo "set scene $scene display name to $label"
@@ -1373,6 +1414,7 @@ cmd_rename() {  # $1 = old, $2 = new
   jq --arg o "$old" --arg n "$new" '
     .scenes[$n] = .scenes[$o] |
     del(.scenes[$o]) |
+    if (._layouts? != null) then ._layouts[$n] = ._layouts[$o] | del(._layouts[$o]) else . end |
     if .current == $o then .current = $n else . end
   ' <<<"$SCENES_DOC" | write_atomic "$SCENES_FILE"
   regenerate_ui_state
