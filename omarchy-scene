@@ -1094,8 +1094,15 @@ cmd_rm_plugin() {  # $1 = scene, $2 = id（scene 可为 default）
 cmd_refresh() {
   acquire_lock
   require_scenes
-  # 先让 shell 重新发现插件（新安装/克隆的插件要先 rescan 才进 catalog）
-  omarchy-shell -q shell rescanPlugins >/dev/null 2>&1 || true
+  # 先落“刷新后重开配置页”标记：rescanPlugins 会重建 max.scene 部件（配置面板随部件销毁），
+  # 重建后的 Scene.qml 读到该标记即自动重新打开配置面板；rescan 失败则不保留标记。
+  printf '1' > "$CONFIG_DIR/.reopen-config"
+  # 让 shell 重新发现插件（新安装/克隆的插件要先 rescan 才进 catalog）
+  if omarchy-shell -q shell rescanPlugins >/dev/null 2>&1; then
+    :
+  else
+    rm -f "$CONFIG_DIR/.reopen-config"
+  fi
   local managed; managed=$(managed_ids)
   snapshot_entries $(jq -r '.[]' <<<"$managed")
   regenerate_ui_state

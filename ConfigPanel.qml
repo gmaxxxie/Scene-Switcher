@@ -573,6 +573,7 @@ Item {
                             font.pixelSize: Style.font.caption
                             font.bold: true
                         }
+                        // 小节标题底部分隔线
                         Rectangle {
                             anchors.left: parent.left
                             anchors.leftMargin: Style.space(8)
@@ -705,24 +706,6 @@ Item {
                         }
                     }
 
-                // ---- 刷新按钮：列表右上角（User plugins 标题右侧浮层） ----
-                PanelActionButton {
-                    id: refreshBtn
-                    width: Style.space(22)
-                    height: Style.space(22)
-                    size: Style.space(18)
-                    iconText: "\uF0453"
-                    tooltipText: "Refresh plugin list (pick up newly installed plugins)"
-                    foreground: root.dim
-                    hoverColor: root.fg
-                    onClicked: root.refreshList()
-
-                    anchors.top: pluginList.top
-                    anchors.topMargin: Style.space(2)
-                    anchors.right: pluginList.right
-                    anchors.rightMargin: Style.space(6)
-                }
-
                 // ---- 底部固定 footer ----
                 Column {
                     id: footerSection
@@ -735,11 +718,42 @@ Item {
                         foreground: root.fg
                     }
 
-                    // ---- 底部动作 ----
+                    // ---- 底部动作：左=刷新插件；右=应用到当前场景（同款样式） ----
                     Row {
                         width: parent.width
                         spacing: Style.space(6)
 
+                        // 左下方：刷新插件
+                        PanelActionButton {
+                            width: Style.space(30)
+                            height: Style.space(30)
+                            size: Style.space(30)
+                            iconText: "\uF021"
+                            tooltipText: "Refresh plugin list (pick up newly installed plugins)"
+                            onClicked: root.refreshList()
+                            foreground: root.fg
+                            hoverColor: root.fg
+                        }
+                        Text {
+                            id: refreshLabel
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: "Refresh plugins"
+                            color: root.dim
+                            font.family: root.barFont
+                            font.pixelSize: Style.font.caption
+                            elide: Text.ElideRight
+                            width: Math.min(implicitWidth, parent.width * 0.3)
+                        }
+
+                        // 弹性间隔：把右侧应用组推到右下
+                        Item {
+                            width: parent.width
+                                - Style.space(30) - refreshLabel.width
+                                - Style.space(30) - applyLabel.width
+                                - parent.spacing * 4
+                        }
+
+                        // 右下方：应用到当前场景
                         PanelActionButton {
                             width: Style.space(30)
                             height: Style.space(30)
@@ -751,13 +765,14 @@ Item {
                             hoverColor: root.fg
                         }
                         Text {
-                            width: parent.width - Style.space(36)
+                            id: applyLabel
                             anchors.verticalCenter: parent.verticalCenter
                             text: "Apply to \"" + root.sceneLabel(root.selectedScene) + "\""
                             color: root.dim
                             font.family: root.barFont
                             font.pixelSize: Style.font.caption
                             elide: Text.ElideRight
+                            width: Math.min(implicitWidth, parent.width * 0.4)
                         }
                     }
                 }

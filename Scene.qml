@@ -102,6 +102,21 @@ BarWidget {
         onFileChanged: reload()
     }
 
+    // omarchy-scene refresh 会触发 shell 重建插件部件（本部件被销毁重建，配置面板随之关闭）。
+    // cmd_refresh 已先写入 .reopen-config 标记；此处检测到标记即自动重新打开配置面板并清除标记。
+    FileView {
+        id: reopenMarker
+        path: root.homeDir + "/.config/omarchy/scenes/.reopen-config"
+        watchChanges: true
+        onLoaded: {
+            if (!root.homeDir) return
+            if ((reopenMarker.text() || "").trim() !== "1") return
+            // 清除标记，避免下次部件重建时再次误开面板
+            if (root.bar) root.bar.run("printf 0 > " + root.homeDir + "/.config/omarchy/scenes/.reopen-config")
+            Qt.callLater(root.openConfig)
+        }
+    }
+
     // ---------------- 懒加载配置面板 ----------------
 
     Loader {
