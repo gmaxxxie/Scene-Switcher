@@ -113,7 +113,10 @@ All file I/O is **descriptor-bound** — there is no check-then-open anywhere:
   pathname is never reopened by `cat`/`stat`/`chmod`/`sync`.
 - Backups copy descriptor-to-descriptor into a random `O_EXCL` name in the
   same directory (timestamp + random suffix) — no predictable paths, no
-  collisions.
+  collisions — and auto-prune in place: each switch keeps only the newest
+  `$OMARCHY_SCENES_BACKUPS` (default 10) of its own `shell.json.bak.*`
+  backups. Files belonging to other tools (e.g.
+  `shell.json.bak.opencode.*`) are never touched.
 - Mutating commands hold an `flock(2)`-based mutex whose lock file is opened
   atomically (`O_CREAT` + `O_NOFOLLOW`) and whose holder dies with its parent
   (`PR_SET_PDEATHSIG`), so a crashed CLI never leaves a stale lock.

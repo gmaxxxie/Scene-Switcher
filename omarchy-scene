@@ -60,6 +60,9 @@
 #          exact previous bar arrangement, so unmanaged built-in widgets (wifi/ai/audio/...)
 #          are never displaced by index drift.
 #        - entries.json: <= 4096 records, keys are plugin ids
+#   * Backups auto-prune in-place: each backup keeps only the newest
+#     $OMARCHY_SCENES_BACKUPS (default 10) of its own <file>.bak.* files; files
+#     belonging to other tools (e.g. shell.json.bak.opencode.*) are never touched.
 #        - catalog-derived fields (fed to QML): name <= 128, id <= 64, kinds <= 16 x 32
 #        - menu command/action lengths are bounded by the scene-key limit (<= 10 chars)
 #   * Requires python3 (stdlib only) for the O_NOFOLLOW/O_NONBLOCK openat machinery that
@@ -400,7 +403,39 @@ def op_write(path):
                 pass
         os.close(pfd)
 
-def op_backup(path):
+def prune_backups(pfd, base, ap, keep):
+    """同目录自清理: 只保留本工具创建的、最近 keep 份 <base>.bak.* 备份。
+       命名规则（新旧格式都覆盖）:
+         .<base>.bak.<ts>.<rand>     （描述符安全 I/O 格式）
+         <base>.bak.scene.<ts>       （旧版 set 备份格式，无前导点）
+         <base>.bak.<ts>             （最早 init 备份格式）
+       其他工具的同目录文件（如 shell.json.bak.opencode.*）一律不碰。"""
+    if keep < 1:
+        keep = 1
+    pat = re.compile(r"^\.?" + re.escape(base) + r"\.bak\.(?:(?:scene)\.)?\d+(?:\.\w+)?$")
+    try:
+        names = os.listdir(pfd)
+    except OSError:
+        return
+    cands = []
+    for name in names:
+        if not pat.match(name):
+            continue
+        try:
+            st = os.stat(name, dir_fd=pfd)
+            cands.append((st.st_mtime, name))
+        except OSError:
+            continue
+    if len(cands) <= keep:
+        return
+    cands.sort(key=lambda t: t[0], reverse=True)   # 新的在前
+    for _mt, name in cands[keep:]:
+        try:
+            os.unlink(name, dir_fd=pfd)             # unlinkat(父目录fd, 名字) —— 不跟随任何链接
+        except OSError:
+            pass
+
+def op_backup(path, keep):
     try:
         srcfd, pfd, base, ap = open_final(path, os.O_RDONLY | os.O_NONBLOCK)
     except OSError as e:
@@ -445,6 +480,7 @@ def op_backup(path):
         if total != st.st_size:
             fail("backup source changed while copying: %s" % path)
         os.fsync(tmpfd)
+        prune_backups(pfd, base, ap, keep)
         sys.stdout.write(os.path.join(os.path.dirname(ap), tmpname) + "\n")
         sys.stdout.flush()
     finally:
@@ -520,7 +556,7 @@ def main(argv):
     elif op == "write":
         op_write(argv[1])
     elif op == "backup":
-        op_backup(argv[1])
+        op_backup(argv[1], int(argv[2]) if len(argv) > 2 else 10)
     elif op == "lock":
         op_lock(argv[1], argv[2])
     else:
@@ -548,8 +584,9 @@ read_entries()    { secure_io read entries "${1:?}"; }
 # 原子写: 内容经 stdin 传入 -> 同目录 O_EXCL 随机临时文件 -> 描述符写/fchmod/fsync -> 原子 rename
 write_atomic() { secure_io write "${1:?}"; }
 
-# 备份: 描述符到描述符复制到同目录随机名（时间戳+随机后缀），输出新备份路径
-secure_backup() { secure_io backup "${1:?}"; }
+# 备份: 描述符到描述符复制到同目录随机名（时间戳+随机后缀），输出新备份路径。
+# 每次备份后同目录自清理: 只保留最近 $OMARCHY_SCENES_BACKUPS（默认 10）份本工具自己的备份。
+secure_backup() { secure_io backup "${1:?}" "${OMARCHY_SCENES_BACKUPS:-10}"; }
 
 # 并发互斥: O_NOFOLLOW 打开锁文件 + flock(EX|NB)；持有进程随本命令退出自动释放
 LOCK_PID=""

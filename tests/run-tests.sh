@@ -324,12 +324,12 @@ t06_concurrent() {
 # ---------------------------------------------------------------- T7 备份不碰撞
 
 t07_backup() {
-  echo "T7 备份创建不碰撞"
+  echo "T7 备份创建不碰撞 + 自动保留上限"
   setup_env
   printf '{"data":42}\n' > "$WORK/home/.config/omarchy/shell.json"
   pids=()
   for i in $(seq 1 12); do
-    ( python3 "$PYIO" backup "$WORK/home/.config/omarchy/shell.json" > "$WORK/bk.$i" 2>/dev/null ) &
+    ( python3 "$PYIO" backup "$WORK/home/.config/omarchy/shell.json" 99 > "$WORK/bk.$i" 2>/dev/null ) &
     pids+=($!)
   done
   for p in "${pids[@]}"; do wait "$p"; done
@@ -349,6 +349,29 @@ t07_backup() {
     ok "全部备份文件内容与源一致"
   else
     bad "$badcount 个备份内容异常"
+  fi
+  # ---- 自清理: 只保留最近 N 份，且不碰他人文件 ----
+  d="$WORK/home/.config/omarchy"
+  # 预置 15 份旧格式（bak.scene.<ts>）+ 1 份他人工具备份（bak.opencode.<ts>）+ 1 个普通文件
+  for i in $(seq 1 15); do printf 'old%s' "$i" > "$d/shell.json.bak.scene.$((1700000000 + i))"; done
+  printf 'OTHER-TOOL' > "$d/shell.json.bak.opencode.1700000999"
+  printf 'KEEP-ME' > "$d/user-notes.txt"
+  new=$(python3 "$PYIO" backup "$d/shell.json" 5 2>/dev/null)
+  nleft=$(find "$d" -maxdepth 1 \( -name 'shell.json.bak.scene.*' -o -name '.shell.json.bak.*' \) | wc -l)
+  if [[ $nleft -eq 5 ]]; then
+    ok "keep=5 → 清理后恰好剩 5 份备份（含新备份）"
+  else
+    bad "保留数量不对: $nleft (想要 5)"
+  fi
+  if [[ -f "$d/shell.json.bak.opencode.1700000999" && "$(cat "$d/shell.json.bak.opencode.1700000999")" == "OTHER-TOOL" ]]; then
+    ok "他人工具的 .bak.opencode.* 备份未被触碰"
+  else
+    bad "他人工具的备份被误删/篡改！"
+  fi
+  if [[ -f "$d/user-notes.txt" && "$(cat "$d/user-notes.txt")" == "KEEP-ME" ]]; then
+    ok "同目录无关文件未被触碰"
+  else
+    bad "同目录无关文件被误删！"
   fi
   echo "  (T7 done)"
 }
