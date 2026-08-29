@@ -38,6 +38,8 @@ cafe, Focus at a desk — with one click or keypress instead of editing
 
 ## Install
 
+Requires `python3` (stdlib only — used for the descriptor-bound secure I/O core).
+
 ```sh
 # 1. Install the plugin (from the marketplace URL or this repository)
 omarchy plugin add https://github.com/gmaxxxie/Scene-Switcher.git --enable
@@ -92,6 +94,38 @@ files atomically (backing up `shell.json` before each switch), and issues a
 reload query to the running shell. It never uses `sudo`, starts no extra
 Quickshell process, and sends no network traffic.
 
+All file I/O is **descriptor-bound** — there is no check-then-open anywhere:
+
+- Every read opens the path **once** via `openat(2)`, walking each path
+  component with `O_NOFOLLOW` (`O_DIRECTORY` on intermediate directories),
+  then validates with `fstat(2)`: regular file, owned by the current user,
+  size ≤ 8 MiB. Reads use `O_NONBLOCK` + `S_ISREG` so a hostile FIFO at a
+  config path can never block the CLI. A symlink pointed at a config path
+  (or any component of it) is refused with `ELOOP`, and the validated bytes
+  are captured from that descriptor — later tools (`jq`/`awk`/`sed`/`grep`)
+  only ever consume the in-memory content via stdin, never the mutable
+  pathname.
+- Writes create a random temp file in the **same directory** as the target
+  with `O_CREAT|O_EXCL` and keep its descriptor open for the whole
+  create → write → validate → `fchmod` → `fsync` → atomic `rename(2)`
+  sequence (rename bound to the validated parent-directory descriptor, so a
+  directory switch mid-operation cannot redirect the publish). The temp
+  pathname is never reopened by `cat`/`stat`/`chmod`/`sync`.
+- Backups copy descriptor-to-descriptor into a random `O_EXCL` name in the
+  same directory (timestamp + random suffix) — no predictable paths, no
+  collisions.
+- Mutating commands hold an `flock(2)`-based mutex whose lock file is opened
+  atomically (`O_CREAT` + `O_NOFOLLOW`) and whose holder dies with its parent
+  (`PR_SET_PDEATHSIG`), so a crashed CLI never leaves a stale lock.
+- Structural limits are enforced on the validated read before anything is
+  emitted to QML: 8 MiB byte cap, JSON depth ≤ 32, strings ≤ 4096 chars,
+  array/object member counts ≤ 65536; `scenes.json` — at most 12 scenes,
+  scene keys/labels ≤ 10 chars (`[a-zA-Z0-9_-]`), icons ≤ 4 chars, plugin
+  lists ≤ 256 entries, plugin ids `^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`;
+  `entries.json` ≤ 4096 records; catalog-derived fields (`name` ≤ 128,
+  `id` ≤ 64, `kinds` ≤ 16×32); menu actions are bounded by the scene-key
+  limit.
+
 ## Development
 
 This repository is the source of truth. The live plugin folder
@@ -100,8 +134,15 @@ deploy (the shell hot-reloads on save):
 
 ```sh
 ./sync.sh          # copy the runtime files to the live folder
+bash tests/run-tests.sh   # security/regression suite (92 checks)
 omarchy plugin validate .   # spec validation before pushing
 ```
+
+The test suite covers symlink rejection, TOCTOU swap races, FIFO
+non-blocking, oversized files, concurrent writers, backup collisions, menu
+shell-injection attempts, structural limit enforcement, lock safety, and
+byte-level round-trips — all in a sandboxed fake `$HOME` with stubbed
+`omarchy`/`omarchy-shell` binaries.
 
 ## License
 
