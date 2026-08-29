@@ -565,6 +565,11 @@ t11_lock() {
   else
     bad "符号链接目标被写入！"
   fi
+  # 锁文件为 FIFO → 必须拒绝打开（S_ISREG 校验），绝不静默接受或阻塞
+  rm -f "$OMARCHY_SCENES_DIR/.scenes.lock"
+  mkfifo "$OMARCHY_SCENES_DIR/.scenes.lock"
+  expect_fast_fail "FIFO 锁文件 → add 快速拒绝（不阻塞）" 5 "$SCENE" add s1
+  rm -f "$OMARCHY_SCENES_DIR/.scenes.lock"
   # 正常创建锁文件：互斥生效
   rm -f "$OMARCHY_SCENES_DIR/.scenes.lock"
   expect "正常 add（锁文件重建）" "$SCENE" add s1

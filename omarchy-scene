@@ -498,6 +498,17 @@ def op_lock(lockpath, statuspath):
     except OSError as e:
         fail("cannot open lock file %s: %s" % (lockpath, e.strerror or e))
     os.close(pfd)
+    # 与其他读写路径等价的保护: 锁文件必须是本人所有的常规文件（O_NOFOLLOW 已挡住符号链接，
+    # 这里再挡住 FIFO/设备等非常规文件，避免被静默接受为锁对象）
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            fail("refusing non-regular lock file (symlink/FIFO/device): %s" % lockpath)
+        if st.st_uid != os.geteuid():
+            fail("refusing lock file not owned by current user: %s" % lockpath)
+    except SystemExit:
+        os.close(fd)
+        raise
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
