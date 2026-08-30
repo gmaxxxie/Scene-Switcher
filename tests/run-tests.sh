@@ -17,6 +17,7 @@
 #   T12 字节级往返一致性（读回内容与写入完全一致）
 #   T13 场景切换布局稳定（未受管内置部件不被挤走）
 #   T14 reopen 标记安全（写入经 secure_io；清除安全写 0 保持常规文件；符号链接标记拒绝写入且只 unlink）
+#   T15 新装继承（default 为基准集，各场景继承 default+locked；内置不受管，系统状态不被场景切换破坏）
 #
 # 运行: bash tests/run-tests.sh   （结果非零退出码表示有失败）
 #
@@ -743,6 +744,99 @@ t14_reopen_marker() {
   echo "  (T14 done)"
 }
 
+# ---------------------------------------------------------------- T15 新装继承
+
+# 新装场景继承: default 是基准集（每个场景都继承），内置插件不受管（跟随系统状态）。
+# 回归: init 把内置抄进 default + 非 default 场景 target 不含 default 会导致
+# 首次切换到新场景时系统默认内置部件被移出 bar 并禁用。
+
+t15_inheritance() {
+  echo "T15 新装继承: default 基准集继承 + 内置不受管"
+  setup_env
+  # 真实形态: 内置 bar-widget + 内置 service + 用户插件（bar-widget + service）
+  cat > "$WORK/bin/omarchy" <<'SH'
+#!/usr/bin/env bash
+if [[ "${1:-} ${2:-}" == "plugin list" ]]; then
+  cat <<'J'
+[{"id":"pkg.bar","name":"Bar","kinds":["bar"],"enabled":true,"firstParty":true},
+ {"id":"omarchy.menu","name":"Menu","kinds":["bar-widget"],"enabled":true,"firstParty":true},
+ {"id":"omarchy.clock","name":"Clock","kinds":["bar-widget"],"enabled":true,"firstParty":true},
+ {"id":"omarchy.tray","name":"Tray","kinds":["bar-widget"],"enabled":true,"firstParty":true},
+ {"id":"omarchy.network","name":"Network","kinds":["bar-widget"],"enabled":true,"firstParty":true},
+ {"id":"user.wid","name":"User Widget","kinds":["bar-widget"],"enabled":true,"firstParty":false},
+ {"id":"user.svc","name":"User Service","kinds":["service"],"enabled":true,"firstParty":false},
+ {"id":"user.extra","name":"Extra Widget","kinds":["bar-widget"],"enabled":false,"firstParty":false}]
+J
+else exit 0; fi
+SH
+  chmod +x "$WORK/bin/omarchy"
+  cat > "$WORK/home/.config/omarchy/shell.json" <<'JSON'
+{"version":1,"bar":{"id":"pkg.bar","layout":{"left":[{"id":"omarchy.menu"}],"center":[{"id":"omarchy.clock"}],"right":[{"id":"omarchy.tray"},{"id":"user.wid"},{"id":"omarchy.network"}]}},"plugins":[{"id":"user.svc"}]}
+JSON
+
+  "$SCENE" init >/dev/null 2>&1
+  def=$(jq -c '.default | sort' "$OMARCHY_SCENES_DIR/scenes.json")
+  if [[ "$def" == '["user.svc","user.wid"]' ]]; then
+    ok "init: default 只含用户插件（内置未抄入）"
+  else
+    bad "init default 含内置: $def"
+  fi
+
+  "$SCENE" add dev >/dev/null 2>&1
+  "$SCENE" set dev >/dev/null 2>&1
+  right=$(jq -r '[.bar.layout.right[].id] | join(",")' "$WORK/home/.config/omarchy/shell.json")
+  plugins=$(jq -r '[.plugins[].id] | join(",")' "$WORK/home/.config/omarchy/shell.json")
+  disabled=$(jq -r '(.disabledPlugins // []) | join(",")' "$WORK/home/.config/omarchy/shell.json")
+  if [[ "$right" == "omarchy.tray,user.wid,omarchy.network" ]]; then
+    ok "set dev: 内置 tray/network 与 default 的 user.wid 都留在 bar"
+  else
+    bad "set dev right 丢失: $right"
+  fi
+  if [[ "$plugins" == "user.svc" ]]; then
+    ok "set dev: default 的 user.svc 保持启用"
+  else
+    bad "set dev plugins 异常: $plugins"
+  fi
+  if [[ -z "$disabled" ]]; then
+    ok "set dev: 无插件被加入 disabledPlugins（内置不受管）"
+  else
+    bad "set dev disabledPlugins 非空: $disabled"
+  fi
+
+  # 场景专属插件: dev 开 → 切 default 关
+  # user.extra 在目录里（bar-widget），经 toggle-plugin 加入 dev 场景 + enable
+  "$SCENE" toggle-plugin dev user.extra on >/dev/null 2>&1
+  "$SCENE" set dev >/dev/null 2>&1
+  if jq -e '.bar.layout.right[] | select(.id == "user.extra")' "$WORK/home/.config/omarchy/shell.json" >/dev/null 2>&1; then
+    ok "set dev: 场景专属 user.extra 在"
+  else
+    bad "set dev: user.extra 缺失"
+  fi
+  "$SCENE" set default >/dev/null 2>&1
+  if jq -e '.bar.layout.right[] | select(.id == "user.extra")' "$WORK/home/.config/omarchy/shell.json" >/dev/null 2>&1; then
+    bad "set default: 场景专属 user.extra 应被移出"
+  else
+    ok "set default: 场景专属 user.extra 被移出，default 基准不受影响"
+  fi
+  right2=$(jq -r '[.bar.layout.right[].id] | join(",")' "$WORK/home/.config/omarchy/shell.json")
+  if [[ "$right2" == "omarchy.tray,user.wid,omarchy.network" ]]; then
+    ok "set default 往返: 布局还原（内置 + default 基准）"
+  else
+    bad "set default 往返布局异常: $right2"
+  fi
+
+  # 锁定继承: lock user.wid 后，新场景仍继承（default 已含它，无变化但语义成立）
+  "$SCENE" lock user.svc >/dev/null 2>&1
+  "$SCENE" add focus >/dev/null 2>&1
+  "$SCENE" set focus >/dev/null 2>&1
+  if jq -e '.plugins[] | select(.id == "user.svc")' "$WORK/home/.config/omarchy/shell.json" >/dev/null 2>&1; then
+    ok "set focus: 锁定的 user.svc 仍启用（继承）"
+  else
+    bad "set focus: 锁定 user.svc 丢失"
+  fi
+  echo "  (T15 done)"
+}
+
 # ---------------------------------------------------------------- 汇总
 
 summary() {
@@ -772,4 +866,5 @@ t11_lock
 t12_roundtrip
 t13_layout_stability
 t14_reopen_marker
+t15_inheritance
 summary

@@ -18,7 +18,10 @@ cafe, Focus at a desk — with one click or keypress instead of editing
 - **Bar widget** — current scene icon + label; left click opens the switch popup
 - **Scene switching** — `omarchy-scene set <scene>` applies a scene by
   atomically rewriting `~/.config/omarchy/shell.json` (positions/settings of
-  enabled plugins are cached and restored on re-enable)
+  enabled plugins are cached and restored on re-enable). The **default set is
+  the base**: its plugins stay enabled in every scene, and every scene runs
+  default + locked + its own plugins. Plugins in no scene are unmanaged and
+  never touched — including omarchy built-ins, which follow the system state.
 - **Config panel** — lazy-loaded centered overlay (destroyed on close):
   scene tabs, create/rename/delete (max 5 custom scenes, names ≤10 chars),
   per-scene plugin toggles, lock/unlock buttons, and a preset icon picker
@@ -30,9 +33,10 @@ cafe, Focus at a desk — with one click or keypress instead of editing
   plugins and omarchy built-ins follow the system default; plugins in a scene
   show the scene switch state; unmanaged (new) plugins echo their system
   default on/off
-- **Locked plugins** — locked plugins are inherited by every scene (always on);
-  omarchy built-ins are listed after user plugins, locked by default and
-  following the system state — unlock them to manage manually
+- **Locked plugins** — locked plugins are inherited by every scene (always on),
+  on top of the default base set; omarchy built-ins are listed after user
+  plugins, locked by default and following the system state — unlock them to
+  manage manually
 - **Keybinding** — `SUPER + SHIFT + S` cycles scenes
 - **Menu integration** — optional "Scenes" submenu in the omarchy menu
 
@@ -186,7 +190,7 @@ deploy (the shell hot-reloads on save):
 
 ```sh
 ./sync.sh          # deploy the plugin folder + reinstall the CLI to ~/.local/bin
-bash tests/run-tests.sh   # security/regression suite (112 checks)
+bash tests/run-tests.sh   # security/regression suite (120 checks)
 omarchy plugin validate .   # spec validation before pushing
 ```
 

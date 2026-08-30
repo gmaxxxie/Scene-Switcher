@@ -3,8 +3,10 @@
 # omarchy-scene - Scene-based omarchy plugin set switcher
 #
 # Switch omarchy plugin sets by occasion (scene):
-#   - default is just a normal scene type, independent of the others
-#   - switching = enable only the scene's own plugins (non-builtin); unlisted plugins are untouched
+#   - default is the base set: its plugins stay enabled in every scene
+#   - every scene runs default + locked (inherited, always on) + its own plugins
+#   - plugins in no scene are unmanaged and never touched
+#   - omarchy built-ins follow the system state and are locked by default
 #
 # Mechanism: atomically rewrite ~/.config/omarchy/shell.json (shell hot-reloads) and cache each
 # managed plugin's full entry (position + settings), restoring it exactly on re-enable.
@@ -720,13 +722,13 @@ managed_ids() {
   ' <<<"$SCENES_DOC"
 }
 
-# 计算目标集合: default ∪ 指定场景插件（scene 为 default 时仅默认集）
-target_ids() {  # $1 = scene —— 非 default 场景 = 锁定插件（继承）+ 该场景自己的插件；default = 默认清单
+# 计算目标集合: 非 default 场景 = default 集（继承）∪ 锁定插件（继承）∪ 该场景自己的插件；default = 仅默认集
+target_ids() {  # $1 = scene
   if [[ "$1" == "default" ]]; then
     jq -r '[.default // []] | add | unique' <<<"$SCENES_DOC"
   else
     jq -r --arg s "$1" '
-      ([.locked // []] + [.scenes[$s].plugins // []]) | add | unique
+      ([.default // []] + [.locked // []] + [.scenes[$s].plugins // []]) | add | unique
     ' <<<"$SCENES_DOC"
   fi
 }
@@ -842,7 +844,7 @@ cmd_init() {
   acquire_lock
   [[ -f "$SCENES_FILE" ]] && secure_backup "$SCENES_FILE" >/dev/null
 
-  local ids ids_json default_json shell_doc init_layout
+  local ids ids_json default_json shell_doc init_layout catalog
   shell_doc=$(safe_read_json "$SHELL_JSON")
   ids=$(jq -r '[.bar.layout.left[], .bar.layout.center[], .bar.layout.right[], .plugins[]] | map(.id) | unique | .[]' <<<"$shell_doc")
   [[ -n "$ids" ]] || die "no manageable plugin entries in shell.json"
@@ -851,14 +853,21 @@ cmd_init() {
   snapshot_entries $ids
 
   ids_json=$(printf '%s\n' "$ids" | jq -R . | jq -s .)
-  default_json=$(printf '%s\n' "$ids" | jq -R . | jq -s .)
+  # default 只收非 firstParty（内置）插件：内置跟随系统状态、不受场景切换管理。
+  # 若把内置抄进 default，它们会变成“受管”，首次切换到新场景时 system-default
+  # 的内置部件（tray/clock/menu/…）会被移出 bar 并禁用——新装继承 bug 的根源。
+  catalog=$(omarchy plugin list --json 2>/dev/null) || catalog="[]"
+  default_json=$(jq -n --argjson ids "$ids_json" --argjson cat "$catalog" '
+    def is_fp($id): ((($cat | map(select(.id == $id))[0]) // {}).firstParty // false) == true;
+    [ $ids[] | select(is_fp(.) | not) ]
+  ')
   init_layout=$(jq -c '.bar.layout // {left: [], center: [], right: []}' <<<"$shell_doc")
 
   jq -n --argjson default "$default_json" --argjson layout "$init_layout" '
     {
       version: 1,
       current: "default",
-      _comment: "omarchy-scene scene config. default is a normal scene type, independent of the others. Switching enables only its own plugins (non-builtin) plus locked plugins (inherited by every scene, always on); plugins in no scene are unmanaged. omarchy built-ins are shown in the panel after user plugins and locked by default (they follow the system state); unlock them (unlockedBuiltins) to manage manually. Manage with omarchy-scene add/add-plugin/rm/rm-plugin/toggle-plugin/lock/unlock, or edit this file directly.",
+      _comment: "omarchy-scene scene config. default is the base set: its plugins stay enabled in every scene (inherited), and every scene runs default + locked (inherited, always on) + its own plugins. Plugins in no scene are unmanaged and never touched; omarchy built-ins follow the system state and are locked by default (unlock them via unlockedBuiltins to manage manually). Manage with omarchy-scene add/add-plugin/rm/rm-plugin/toggle-plugin/lock/unlock, or edit this file directly.",
       default: $default,
       locked: [],
       unlockedBuiltins: [],
@@ -869,7 +878,7 @@ cmd_init() {
   regenerate_ui_state
 
   echo "initialized $SCENES_FILE"
-  echo "  default set (currently enabled plugins): $(echo "$ids" | tr '\n' ' ')"
+  echo "  default base set (user plugins): $(echo "$default_json" | jq -r '.[]' | tr '\n' ' ')"
   echo "Next: omarchy-scene add <name> --label <label>  # create a scene, then omarchy-scene add-plugin <scene> <plugin-id>"
   echo "      omarchy-scene list      # view"
 }
@@ -886,7 +895,7 @@ cmd_list() {
 
   echo "Current scene: $current"
   echo
-  echo "default scene (independent of others):"
+  echo "default scene (base set, inherited by every scene):"
   jq -r '.default[]' <<<"$SCENES_DOC" | while read -r id; do
     local st; st=$(jq -r --arg id "$id" '.[$id] // false' <<<"$em")
     printf '  %s %s\n' "$([[ $st == true ]] && echo '✓' || echo '·')" "$id"
