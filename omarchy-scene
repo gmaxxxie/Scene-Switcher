@@ -15,6 +15,7 @@
 #   omarchy-scene list                list all scenes and plugin membership
 #   omarchy-scene current             print the current scene
 #   omarchy-scene set <scene> [--dry-run]   switch to a scene
+#   omarchy-scene apply <scene> --on <ids> --off <ids>   apply marked toggles + switch
 #   omarchy-scene cycle [--dry-run]   cycle to the next scene (keybind-friendly)
 #   omarchy-scene init [--force]      bootstrap config from currently enabled plugins
 #   omarchy-scene add <name> [--label <label>]   create a scene
@@ -915,33 +916,25 @@ cmd_list() {
 
 cmd_current() { require_scenes; jq -r '.current // "default"' <<<"$SCENES_DOC"; }
 
-cmd_set() {  # $1 = scene, $2 = --dry-run
-  local scene="${1:-}" dry=0
-  [[ ${2:-} == "--dry-run" ]] && dry=1
-  acquire_lock
-  require_scenes
-  scene_exists "$scene" || die "unknown scene: '$scene' (available: $(jq -r '.scenes | keys | join(", ")' <<<"$SCENES_DOC"))"
-
-  local managed targets catalog shell_doc new_shell before after
+# 计算切换 diff（只读，打印 to_enable/to_disable；dry-run 与写入前预览共用），
+# 结果写入全局 DIFF_* 供 activate_scene 发布。依赖 SCENES_DOC；调用方需已 require_scenes。
+DIFF_SHELL="" DIFF_CUR_SCENE="" DIFF_CUR_LAYOUT=""
+set_diff() {  # $1 = scene；$2 = quiet（不打印）
+  local scene="$1" quiet="${2:-}"
+  local managed targets catalog shell_doc new_shell before after to_enable to_disable
   managed=$(managed_ids)
   targets=$(target_ids "$scene")
   # managed / targets 本身就是合法 JSON 数组（jq 输出），直接作为 --argjson 传入
   catalog=$(omarchy plugin list --json 2>/dev/null | jq 'map({(.id): {kinds: .kinds, firstParty: .firstParty}}) | add')
 
-  # 1) 先快照当前受管集合（保证切换后被关闭的插件位置/设置不丢）
-  if [[ $dry -eq 0 ]]; then
-    snapshot_entries $(jq -r '.[]' <<<"$managed")
-  fi
-
-  # 2) 计算前后启用状态，生成 diff（shell 文档只经已验证内容，无路径重开）
+  # 记录“离开前”场景的完整布局快照（含未受管内置部件如 wifi/ai/audio）；
+  # 下一次再进入该场景时用它精确还原，避免按缓存索引增量插入造成的部件漂移。
   shell_doc=$(safe_read_json "$SHELL_JSON")
-  # 2a) 记录“离开前”场景的完整布局快照（含未受管内置部件如 wifi/ai/audio）；
-  #     下一次再进入该场景时用它精确还原，避免按缓存索引增量插入造成的部件漂移。
   local cur_scene cur_layout cached_layout seeded_shell
   cur_scene=$(jq -r '.current // "default"' <<<"$SCENES_DOC")
   cur_layout=$(jq -c '.bar.layout // {left: [], center: [], right: []}' <<<"$shell_doc")
-  # 2b) 若目标场景已有布局快照，则以其为起始布局再跑 transform（快照里的受管部件已就位，
-  #     insert_widget 全部 no-op，未受管内置部件保持在快照位置，成员关系仍由 transform 强制）
+  # 若目标场景已有布局快照，则以其为起始布局再跑 transform（快照里的受管部件已就位，
+  # insert_widget 全部 no-op，未受管内置部件保持在快照位置，成员关系仍由 transform 强制）
   cached_layout=$(jq -r --arg s "$scene" '._layouts[$s] // null' <<<"$SCENES_DOC")
   if [[ "$cached_layout" != "null" && -n "$cached_layout" ]]; then
     seeded_shell=$(jq --argjson lay "$cached_layout" '.bar.layout = $lay' <<<"$shell_doc")
@@ -959,43 +952,62 @@ cmd_set() {  # $1 = scene, $2 = --dry-run
     <<<"$seeded_shell")
   after=$(enabled_map "$catalog" <<<"$new_shell")
 
-  # diff 报告
-  local to_enable to_disable
-  to_enable=$(jq -nr --argjson a "$before" --argjson b "$after" '
-    ($b | to_entries | map(select(.value == true))) as $ben |
-    ($a | to_entries | map(select(.value == true))) as $aen |
-    ([$ben[].key] - [$aen[].key]) | .[]
-  ' | grep -v '^$' || true)
-  to_disable=$(jq -nr --argjson a "$before" --argjson b "$after" '
-    ($b | to_entries | map(select(.value == true))) as $ben |
-    ($a | to_entries | map(select(.value == true))) as $aen |
-    ([$aen[].key] - [$ben[].key]) | .[]
-  ' | grep -v '^$' || true)
+  if [[ -z "$quiet" ]]; then
+    to_enable=$(jq -nr --argjson a "$before" --argjson b "$after" '
+      ($b | to_entries | map(select(.value == true))) as $ben |
+      ($a | to_entries | map(select(.value == true))) as $aen |
+      ([$ben[].key] - [$aen[].key]) | .[]
+    ' | grep -v '^$' || true)
+    to_disable=$(jq -nr --argjson a "$before" --argjson b "$after" '
+      ($a | to_entries | map(select(.value == true))) as $aen |
+      ($b | to_entries | map(select(.value == true))) as $ben |
+      ([$aen[].key] - [$ben[].key]) | .[]
+    ' | grep -v '^$' || true)
+    echo "Scene [$scene]:"
+    [[ -n "$to_enable" ]] && for id in $to_enable; do echo "  + enable  $id"; done || true
+    [[ -n "$to_disable" ]] && for id in $to_disable; do echo "  - disable  $id"; done || true
+    [[ -z "$to_enable" && -z "$to_disable" ]] && echo "  (no change)"
+  fi
+  DIFF_SHELL="$new_shell"
+  DIFF_CUR_SCENE="$cur_scene"
+  DIFF_CUR_LAYOUT="$cur_layout"
+}
 
-  echo "Scene [$scene]:"
-  [[ -n "$to_enable" ]] && for id in $to_enable; do echo "  + enable  $id"; done || true
-  [[ -n "$to_disable" ]] && for id in $to_disable; do echo "  - disable  $id"; done || true
-  [[ -z "$to_enable" && -z "$to_disable" ]] && echo "  (no change)"
+# 核心切换：把 set_diff 算出的目标状态原子发布到 shell.json + 场景文档，并重载 shell。
+# 调用方必须已持有独占锁（不重复 acquire_lock）；内部重读 scenes.json（动态场景）。
+activate_scene() {  # $1 = scene
+  local scene="$1"
+  require_scenes
+  scene_exists "$scene" || die "unknown scene: '$scene' (available: $(jq -r '.scenes | keys | join(", ")' <<<"$SCENES_DOC"))"
+  # 先快照当前受管集合（保证切换后被关闭的插件位置/设置不丢）
+  snapshot_entries $(jq -r '.[]' <<<"$(managed_ids)")
+  set_diff "$scene" quiet
+  # 3) 校验生成结果（内容变量，非路径）-> 备份 -> 原子写
+  jq -e . <<<"$DIFF_SHELL" >/dev/null || die "transform produced invalid JSON, write aborted"
+  secure_backup "$SHELL_JSON" >/dev/null
+  printf '%s\n' "$DIFF_SHELL" | write_atomic "$SHELL_JSON"
+  # 4) 记录当前场景 + 离开前场景的布局快照（单次原子写；下次进入该场景时精确还原）
+  jq --arg c "$DIFF_CUR_SCENE" --arg s "$scene" --argjson lay "$DIFF_CUR_LAYOUT" \
+    '.current = $s | ._layouts[$c] = $lay' <<<"$SCENES_DOC" | write_atomic "$SCENES_FILE"
+  regenerate_ui_state
+  reload_shell
+  notify "Scene switched" "$scene"
+  echo "Switched to scene: $scene"
+}
 
+cmd_set() {  # $1 = scene, $2 = --dry-run
+  local scene="${1:-}" dry=0
+  [[ ${2:-} == "--dry-run" ]] && dry=1
+  acquire_lock
+  require_scenes
+  scene_exists "$scene" || die "unknown scene: '$scene' (available: $(jq -r '.scenes | keys | join(", ")' <<<"$SCENES_DOC"))"
+  set_diff "$scene"
   if [[ $dry -eq 1 ]]; then
     echo
     echo "(dry-run, nothing written; drop --dry-run to apply)"
     return 0
   fi
-
-  # 3) 校验生成结果（内容变量，非路径）-> 备份 -> 原子写
-  jq -e . <<<"$new_shell" >/dev/null || die "transform produced invalid JSON, write aborted"
-  secure_backup "$SHELL_JSON" >/dev/null
-  printf '%s\n' "$new_shell" | write_atomic "$SHELL_JSON"
-
-  # 4) 记录当前场景 + 离开前场景的布局快照（单次原子写；下次进入该场景时精确还原）
-  jq --arg c "$cur_scene" --arg s "$scene" --argjson lay "$cur_layout" \
-    '.current = $s | ._layouts[$c] = $lay' <<<"$SCENES_DOC" | write_atomic "$SCENES_FILE"
-  regenerate_ui_state
-
-  reload_shell
-  notify "Scene switched" "$scene"
-  echo "Switched to scene: $scene"
+  activate_scene "$scene"
 }
 
 cmd_cycle() {
@@ -1399,6 +1411,70 @@ cmd_toggle_plugin() {  # $1 = scene, $2 = id, $3 = on|off
   echo "ok"
 }
 
+# 配置面板 Apply：把标记的开关批量落盘并切换到目标场景（一次事务、一次锁）。
+# 用法: apply <scene> --on <id1,id2,...> --off <id3,...>（on/off 集合可省略）
+cmd_apply() {
+  local scene="${1:-}"; shift || true
+  local on_ids="" off_ids=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --on) on_ids="${2:-}"; shift 2 ;;
+      --off) off_ids="${2:-}"; shift 2 ;;
+      *) die "usage: omarchy-scene apply <scene> --on <ids> --off <ids>" ;;
+    esac
+  done
+  [[ -n "$scene" ]] || die "usage: omarchy-scene apply <scene> --on <ids> --off <ids>"
+  acquire_lock
+  require_scenes
+  scene_exists "$scene" || die "unknown scene: $scene"
+
+  local id sec
+  # 校验全部 id（防注入；必须过插件 id 正则并在目录里）
+  for id in ${on_ids//,/ } ${off_ids//,/ }; do
+    [[ "$id" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$ ]] || die "invalid plugin id: $id"
+    plugin_in_catalog "$id" || die "unknown plugin: $id"
+  done
+  # 先快照变更条目（off 的条目缓存下来，未来 enable 时还原位置/设置）
+  [[ -n "$on_ids$off_ids" ]] && snapshot_entries ${on_ids//,/ } ${off_ids//,/ }
+
+  if [[ -n "$on_ids" ]]; then
+    for id in ${on_ids//,/ }; do
+      sec=""
+      sec=$(secure_io read-maybe entries "$ENTRIES_FILE" 2>/dev/null | jq -r --arg i "$id" '.[$i].section // ""') || sec=""
+      if [[ -n "$sec" ]]; then
+        omarchy plugin enable "$id" --section "$sec" >/dev/null 2>&1 || die "omarchy plugin enable failed: $id"
+      else
+        omarchy plugin enable "$id" >/dev/null 2>&1 || die "omarchy plugin enable failed: $id"
+      fi
+      if [[ "$scene" == "default" ]]; then
+        jq -e --arg i "$id" '(.default | index($i)) == null' <<<"$SCENES_DOC" >/dev/null 2>&1 \
+          && jq --arg i "$id" '.default += [$i]' <<<"$SCENES_DOC" | write_atomic "$SCENES_FILE"
+      else
+        jq -e --arg s "$scene" --arg i "$id" '(.scenes[$s].plugins | index($i)) == null' <<<"$SCENES_DOC" >/dev/null 2>&1 \
+          && jq --arg s "$scene" --arg i "$id" '.scenes[$s].plugins += [$i]' <<<"$SCENES_DOC" | write_atomic "$SCENES_FILE"
+      fi
+      SCENES_DOC=$(read_scenes "$SCENES_FILE")
+    done
+  fi
+
+  if [[ -n "$off_ids" ]]; then
+    for id in ${off_ids//,/ }; do
+      omarchy plugin disable "$id" >/dev/null 2>&1 || die "omarchy plugin disable failed: $id"
+      if [[ "$scene" == "default" ]]; then
+        jq --arg i "$id" '.default |= map(select(. != $i))' <<<"$SCENES_DOC" | write_atomic "$SCENES_FILE"
+      else
+        jq --arg s "$scene" --arg i "$id" '.scenes[$s].plugins |= map(select(. != $i))' <<<"$SCENES_DOC" | write_atomic "$SCENES_FILE"
+      fi
+      SCENES_DOC=$(read_scenes "$SCENES_FILE")
+    done
+  fi
+
+  [[ -z "$on_ids" && -z "$off_ids" ]] && echo "(no marks)"
+  [[ -n "$on_ids" ]] && echo "applied on:  ${on_ids//,/ }"
+  [[ -n "$off_ids" ]] && echo "applied off: ${off_ids//,/ }"
+  activate_scene "$scene"
+}
+
 # 判断插件是否为 omarchy 内置（firstParty）
 plugin_is_first_party() {  # $1 = plugin id
   omarchy plugin list --json 2>/dev/null | jq -r --arg id "$1" '.[] | select(.id == $id) | (.firstParty == true)' | grep -q true
@@ -1529,6 +1605,7 @@ case "$cmd" in
   list) cmd_list "$@" ;;
   current) cmd_current "$@" ;;
   set) cmd_set "$@" ;;
+  apply) cmd_apply "$@" ;;
   cycle) cmd_cycle "$@" ;;
   add) cmd_add "$@" ;;
   rm) cmd_rm "$@" ;;

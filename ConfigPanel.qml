@@ -78,6 +78,7 @@ Item {
         root.renameMode = false
         root.newSceneName = ""
         root.sceneIconText = root.sceneIcon(root.selectedScene)
+        root.clearPending()          // 切场景 = 放弃未落盘的标记
         root.rebuildList(false)
     }
 
@@ -166,6 +167,7 @@ Item {
             if (root.cfgScenes[k].name === root.selectedScene) { stillThere = true; break }
         }
         if (!stillThere) root.selectedScene = "default"
+        root.clearPending()          // 数据刷新后标记失效（外部已变更，重算）
         root.rebuildList(true)
     }
 
@@ -214,10 +216,42 @@ Item {
         if (root.bar) root.bar.run(root.bin + " icon " + root.shq(root.selectedScene) + " " + root.shq(g))
     }
 
+    // 面板开关 = 标记（pending），点 Apply & switch 才批量落盘。
+    property var pendingOn: []           // 当前编辑场景的“待开启”标记
+    property var pendingOff: []          // 当前编辑场景的“待关闭”标记
+    property int pendingRev: 0           // 标记版本号（驱动行绑定重绘）
+
+    function clearPending() { root.pendingOn = []; root.pendingOff = []; root.pendingRev = root.pendingRev + 1 }
+
+    // 插件在“当前编辑场景”的显示态：基础成员关系 + 未落盘的标记覆盖
+    function effScene(id) {
+        var inScene = root.pluginInScene(id)
+        if (root.pendingOff.indexOf(id) !== -1) inScene = false
+        if (root.pendingOn.indexOf(id) !== -1) inScene = true
+        return inScene
+    }
+
+    // 点开关：只翻转标记，不落盘、不改 shell.json
+    function togglePending(id) {
+        var onIdx = root.pendingOn.indexOf(id)
+        var offIdx = root.pendingOff.indexOf(id)
+        var inScene = root.pluginInScene(id)
+        if (onIdx !== -1) inScene = true
+        if (offIdx !== -1) inScene = false
+        var wantOn = !inScene
+        if (wantOn) {
+            if (offIdx !== -1) root.pendingOff.splice(offIdx, 1)
+            if (root.pendingOn.indexOf(id) === -1) root.pendingOn.push(id)
+        } else {
+            if (onIdx !== -1) root.pendingOn.splice(onIdx, 1)
+            if (root.pendingOff.indexOf(id) === -1) root.pendingOff.push(id)
+        }
+        root.pendingRev = root.pendingRev + 1
+    }
+
     function togglePlugin(id, currentlyIn) {
-        // id/场景名都经 shq 进 bash，绝不原样拼接（ui-state 虽是 CLI 校验后产物，文件本身仍可被改写）
+        // 遗留即时路径（面板不再使用；CLI 保留 toggle-plugin 命令）
         if (root.bar) root.bar.run(root.bin + " toggle-plugin " + root.shq(root.selectedScene) + " " + root.shq(id) + " " + (currentlyIn ? "off" : "on"))
-        // CLI 内部 = omarchy plugin enable/disable + 更新场景清单 + 重生成 ui-state.json → FileView 刷新
     }
 
     function toggleLock(id, currentlyLocked) {
@@ -249,7 +283,14 @@ Item {
     }
 
     function applyAndSwitch() {
-        if (root.bar) root.bar.run(root.bin + " set " + root.shq(root.selectedScene))
+        // Apply & switch：把当前编辑场景的全部标记一次性落盘并切换（CLI apply 一次事务）
+        var on = root.pendingOn.join(",")
+        var off = root.pendingOff.join(",")
+        var cmd = root.bin + " apply " + root.shq(root.selectedScene)
+        if (on) cmd += " --on " + root.shq(on)
+        if (off) cmd += " --off " + root.shq(off)
+        if (root.bar) root.bar.run(cmd)
+        root.clearPending()
         root.close()
     }
 
@@ -356,7 +397,7 @@ Item {
 
                     Text {
                         width: parent.width
-                        text: "Plugins are toggled with omarchy plugin enable/disable. omarchy built-ins follow the system default and are locked — unlock to manage them."
+                        text: "Toggle switches mark changes — they take effect together when you press Apply & switch below. omarchy built-ins follow the system default and are locked — unlock to manage them."
                         color: root.dim
                         font.family: root.barFont
                         font.pixelSize: Style.font.caption
@@ -669,7 +710,7 @@ Item {
                                 onEntered: prow.hovered = true
                                 onExited: prow.hovered = false
                                 onClicked: {
-                                    if (!modelData.locked) root.togglePlugin(modelData.id, root.pluginEffectiveOn(modelData))
+                                    if (!modelData.locked) root.togglePending(modelData.id)
                                 }
                             }
 
@@ -694,8 +735,9 @@ Item {
                                 }
                                 Text {
                                     text: modelData.id
-                                        + (root.pluginEffectiveOn(modelData) ? " · on" : " · off")
+                                        + (root.pendingRev >= 0 && (modelData.locked ? root.pluginEffectiveOn(modelData) : root.effScene(modelData.id)) ? " · on" : " · off")
                                         + (modelData.locked ? " · locked" : "")
+                                        + (root.pendingRev >= 0 && (root.pendingOn.indexOf(modelData.id) !== -1 || root.pendingOff.indexOf(modelData.id) !== -1) ? " (pending)" : "")
                                     color: root.dim
                                     font.family: root.barFont
                                     font.pixelSize: Style.font.caption
@@ -713,13 +755,13 @@ Item {
                                 anchors.verticalCenter: parent.verticalCenter
                                 spacing: Style.space(4)
 
-                                // 开关：锁定的插件不显示（始终启用、不可开关）
+                                // 开关：锁定的插件不显示（始终启用、不可开关）；未锁定 = 标记态（pending 预览）
                                 ToggleSwitch {
                                     width: Style.space(38)
                                     height: Style.space(22)
                                     anchors.verticalCenter: parent.verticalCenter
                                     visible: !modelData.locked
-                                    checked: root.pluginEffectiveOn(modelData)
+                                    checked: root.pendingRev >= 0 && root.effScene(modelData.id)
                                     interactive: false
                                     foreground: root.fg
                                     accent: root.fg

@@ -25,7 +25,9 @@ cafe, Focus at a desk — with one click or keypress instead of editing
 - **Config panel** — lazy-loaded centered overlay (destroyed on close):
   scene tabs, create/rename/delete (max 5 custom scenes, names ≤10 chars),
   per-scene plugin toggles, lock/unlock buttons, and a preset icon picker
-  (30 icons) for each scene
+  (30 icons) for each scene. Plugin toggles are **marks**: they take effect
+  together when you press **Apply & switch** (marked rows show a "pending"
+  suffix; switching scene tabs or data refreshes discard unapplied marks)
 - **Refresh plugins** — a ⟳ button at the bottom-left of the panel
   rescans the plugin registry, so plugins newly installed through
   `omarchy plugin add`/`clone` appear immediately
@@ -104,6 +106,7 @@ regenerates it (add/set/label/icon/refresh/…).
 ```sh
 omarchy-scene list                                    # scenes + members
 omarchy-scene set <scene>                             # switch (drop --dry-run to apply)
+omarchy-scene apply <scene> --on <ids> --off <ids>     # apply marked toggles + switch (panel)
 omarchy-scene add <name> --label <label> --icon <glyph>
 omarchy-scene rename <old> <new>                      # rename a scene (keeps its label)
 omarchy-scene toggle-plugin <scene> <plugin-id> on|off
@@ -190,7 +193,7 @@ deploy (the shell hot-reloads on save):
 
 ```sh
 ./sync.sh          # deploy the plugin folder + reinstall the CLI to ~/.local/bin
-bash tests/run-tests.sh   # security/regression suite (120 checks)
+bash tests/run-tests.sh   # security/regression suite (135 checks)
 omarchy plugin validate .   # spec validation before pushing
 ```
 

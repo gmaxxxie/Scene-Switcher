@@ -837,6 +837,46 @@ JSON
   echo "  (T15 done)"
 }
 
+# ---------------------------------------------------------------- T16 apply 批量标记
+
+t16_apply_pending() {
+  echo "T16 apply: 面板标记批量落盘 + 切换（一次事务）"
+  setup_env
+  "$SCENE" init >/dev/null 2>&1
+  "$SCENE" add dev >/dev/null 2>&1
+
+  # 无标记 → 仅切换
+  expect "apply 无标记（仅切换）" "$SCENE" apply dev
+  assert_eq "apply 后 current=dev" "$("$SCENE" current)" "dev"
+
+  # 批量 on: org.clock（非 fp，init 后已在 default）加入 dev
+  expect "apply dev --on org.clock" "$SCENE" apply dev --on org.clock
+  assert_eq "dev.plugins 含 org.clock" "$(jq -c '.scenes.dev.plugins' "$OMARCHY_SCENES_DIR/scenes.json")" '["org.clock"]'
+  # enable stub 被调用
+  if [[ -f "$WORK/state.enabled" ]]; then ok "apply on 调用了 plugin enable"; else bad "enable 未触发"; fi
+
+  # 批量 off: 移出 dev
+  expect "apply dev --off org.clock" "$SCENE" apply dev --off org.clock
+  assert_eq "dev.plugins 已空" "$(jq -c '.scenes.dev.plugins' "$OMARCHY_SCENES_DIR/scenes.json")" '[]'
+
+  # default 场景 on/off 作用于 .default 数组
+  expect "apply default --off pkg.wid" "$SCENE" apply default --off pkg.wid
+  assert_eq "default 已移除 pkg.wid" "$(jq -r '.default | index("pkg.wid") != null' "$OMARCHY_SCENES_DIR/scenes.json")" "false"
+  expect "apply default --on org.clock" "$SCENE" apply default --on org.clock
+  assert_eq "default 含 org.clock" "$(jq -r '.default | index("org.clock") != null' "$OMARCHY_SCENES_DIR/scenes.json")" "true"
+
+  # 幂等: 重复 apply 同标记不报错
+  expect "重复 apply 幂等" "$SCENE" apply dev --on org.clock
+
+  # 防注入
+  expect_fail "apply 非法 id 拒绝" "$SCENE" apply dev --on 'evil;rm'
+  expect_fail "apply 未知插件拒绝" "$SCENE" apply dev --on 'no.such.plugin'
+
+  # 布局仍然稳定（switch 复用 activate_scene）
+  expect "apply 后 config 正常" "$SCENE" config
+  echo "  (T16 done)"
+}
+
 # ---------------------------------------------------------------- 汇总
 
 summary() {
@@ -867,4 +907,5 @@ t12_roundtrip
 t13_layout_stability
 t14_reopen_marker
 t15_inheritance
+t16_apply_pending
 summary
