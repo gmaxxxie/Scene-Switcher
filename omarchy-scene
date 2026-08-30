@@ -829,7 +829,7 @@ enabled_map() {
 # ---------------------------------------------------------------- commands
 
 cmd_help() {
-  secure_io read raw "$0" | sed -n '2,25p' | sed 's/^# \{0,1\}//'
+  secure_io read raw "$0" | sed -n '2,/^# Config:/p' | sed '$d' | sed 's/^# \{0,1\}//'
 }
 
 cmd_init() {
