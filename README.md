@@ -95,6 +95,26 @@ revalidates and refreshes that state when you close the editor; any other
 change to `scenes.json` shows up on the next `omarchy-scene` command that
 regenerates it (add/set/label/icon/refresh/…).
 
+## Update
+
+An existing install is updated in two steps (your `scenes.json` config is
+never touched):
+
+```sh
+# 1. Pull the new plugin files (the plugin is git-managed)
+omarchy plugin update max.scene
+
+# 2. Reinstall the companion CLI from the updated plugin folder
+#    (install.sh is idempotent: skips add, skips init, only refreshes the CLI)
+"$HOME/.config/omarchy/plugins/max.scene/install.sh"
+```
+
+`init` is intentionally skipped because `scenes.json` already exists. Scene
+semantics (default base / locked inheritance) apply to existing scenes
+automatically — no migration needed. If your `scenes.json` was created by an
+older `init` and still lists omarchy built-ins in `default`, re-snapshot it
+once with `omarchy-scene init --force` (the old file is backed up first).
+
 ## Usage
 
 - Click the bar widget (or press `SUPER + SHIFT + S`) to switch scenes
