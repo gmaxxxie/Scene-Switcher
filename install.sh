@@ -46,4 +46,4 @@ else
   "$CLI" init
 fi
 
-printf '%s\n' "done — click the scene widget or press SUPER + SHIFT + S"
+printf '%s\n' "done — click the scene widget or press SUPER + SHIFT + T"

@@ -39,7 +39,10 @@ cafe, Focus at a desk — with one click or keypress instead of editing
   on top of the default base set; omarchy built-ins are listed after user
   plugins, locked by default and following the system state — unlock them to
   manage manually
-- **Keybinding** — `SUPER + SHIFT + S` cycles scenes
+- **Keybinding** — `SUPER + SHIFT + T` cycles scenes
+  (`SUPER + SHIFT + S` is omarchy's default screenshot/Google-Maps shortcut, so
+  the scene binding deliberately avoids it; change the line in
+  `~/.config/hypr/bindings.lua` if you prefer another key)
 - **Menu integration** — optional "Scenes" submenu in the omarchy menu
 
 ## Install
@@ -117,7 +120,7 @@ once with `omarchy-scene init --force` (the old file is backed up first).
 
 ## Usage
 
-- Click the bar widget (or press `SUPER + SHIFT + S`) to switch scenes
+- Click the bar widget (or press `SUPER + SHIFT + T`) to switch scenes
 - Click the ⚙ button in the popup to open the configuration panel
 - Pick the scene tab, toggle plugins, lock/unlock, set an icon, then press
   **Apply & switch** — toggles are only **marks** until then
@@ -163,8 +166,10 @@ omarchy-scene menu-add / menu-remove                  # bar menu submenu
 
 ## Keybinding
 
-The widget installs `SUPER + SHIFT + S` -> `omarchy-scene cycle` in
-`~/.config/hypr/bindings.lua`; remove that line to uninstall the binding.
+The widget installs `SUPER + SHIFT + T` -> `omarchy-scene cycle` in
+`~/.config/hypr/bindings.lua` (it is the one non-conflicting `SUPER + SHIFT`
+slot; omarchy uses `SUPER + SHIFT + S` for screenshots/Google Maps). Remove
+that line to uninstall the binding, or edit the key to your preference.
 
 ## Remove
 
