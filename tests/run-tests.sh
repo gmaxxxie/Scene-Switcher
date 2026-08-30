@@ -15,6 +15,8 @@
 #   T10 临时文件卫生（无 .omarchy-scene.*.tmp 残留）
 #   T11 锁文件安全（拒绝符号链接锁文件；flock 互斥）
 #   T12 字节级往返一致性（读回内容与写入完全一致）
+#   T13 场景切换布局稳定（未受管内置部件不被挤走）
+#   T14 reopen 标记安全（写入经 secure_io；符号链接标记拒绝写入且只 unlink 清除）
 #
 # 运行: bash tests/run-tests.sh   （结果非零退出码表示有失败）
 #
@@ -680,6 +682,63 @@ JSON
   echo "  (T13 done)"
 }
 
+# ---------------------------------------------------------------- T14 reopen 标记安全
+
+t14_reopen_marker() {
+  echo "T14 .reopen-config 标记：写入经 secure_io，清除只 unlink"
+  setup_env
+  "$SCENE" init >/dev/null 2>&1
+
+  # 14a. 正常 refresh 经 secure_io 写标记（常规文件，内容 1）
+  expect "refresh 写标记" "$SCENE" refresh
+  if [[ -f "$OMARCHY_SCENES_DIR/.reopen-config" && ! -L "$OMARCHY_SCENES_DIR/.reopen-config" \
+       && "$(cat "$OMARCHY_SCENES_DIR/.reopen-config")" == "1" ]]; then
+    ok "标记为常规文件且内容=1"
+  else
+    bad "标记缺失/是链接/内容异常: $(ls -la "$OMARCHY_SCENES_DIR" 2>/dev/null | grep -i reopen || echo missing)"
+  fi
+
+  # 14b. reopen-done 清除标记（plain unlink）
+  expect "reopen-done 清除标记" "$SCENE" reopen-done
+  if [[ ! -e "$OMARCHY_SCENES_DIR/.reopen-config" ]]; then ok "标记已清除"; else bad "标记仍存在"; fi
+
+  # 14c. 预置符号链接标记 → refresh 拒绝且绝不经链接写入，目标文件不被截断
+  printf 'PRECIOUS' > "$WORK/victim-reopen"
+  rm -f "$OMARCHY_SCENES_DIR/.reopen-config"
+  ln -s "$WORK/victim-reopen" "$OMARCHY_SCENES_DIR/.reopen-config"
+  expect_fail "符号链接标记 → refresh 拒绝" "$SCENE" refresh
+  if [[ "$(cat "$WORK/victim-reopen")" == "PRECIOUS" ]]; then
+    ok "符号链接目标未被截断/写入"
+  else
+    bad "符号链接目标被写坏了！内容: $(cat "$WORK/victim-reopen")"
+  fi
+  # refresh 失败退出前必须已把链接移除（die 前 unlink），不留僵尸链接
+  if [[ ! -L "$OMARCHY_SCENES_DIR/.reopen-config" ]]; then
+    ok "失败后链接被清除"
+  else
+    bad "失败后链接残留"
+  fi
+
+  # 14d. reopen-done 对符号链接标记也只 unlink 链接本身，不触碰目标
+  rm -f "$OMARCHY_SCENES_DIR/.reopen-config"
+  ln -s "$WORK/victim-reopen" "$OMARCHY_SCENES_DIR/.reopen-config"
+  expect "reopen-done 清除符号链接标记" "$SCENE" reopen-done
+  if [[ "$(cat "$WORK/victim-reopen")" == "PRECIOUS" && ! -e "$OMARCHY_SCENES_DIR/.reopen-config" ]]; then
+    ok "reopen-done 只 unlink 链接，目标完好"
+  else
+    bad "reopen-done 行为异常"
+  fi
+
+  # 14e. 干净环境下 refresh 成功且标记再次为常规文件
+  expect "refresh（干净环境）" "$SCENE" refresh
+  if [[ -f "$OMARCHY_SCENES_DIR/.reopen-config" && ! -L "$OMARCHY_SCENES_DIR/.reopen-config" ]]; then
+    ok "最终标记为常规文件"
+  else
+    bad "最终标记异常"
+  fi
+  echo "  (T14 done)"
+}
+
 # ---------------------------------------------------------------- 汇总
 
 summary() {
@@ -708,4 +767,5 @@ t10_hygiene
 t11_lock
 t12_roundtrip
 t13_layout_stability
+t14_reopen_marker
 summary

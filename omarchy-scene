@@ -22,7 +22,8 @@
 #   omarchy-scene refresh             re-snapshot all managed plugin entries
 #   omarchy-scene menu-add            write the Scenes submenu into omarchy-menu.jsonc
 #   omarchy-scene menu-remove         remove the Scenes submenu
-#   omarchy-scene edit                open scenes.json with $EDITOR
+#   omarchy-scene edit                open scenes.json with $EDITOR (revalidates + refreshes the panel)
+#   omarchy-scene reopen-done         clear the .reopen-config marker (QML-internal; unlink, never follows)
 #   omarchy-scene label <scene> <label>   rename a scene's display name
 #   omarchy-scene icon <scene> <glyph>     set a scene's bar icon (empty glyph clears)
 #   omarchy-scene rename <old> <new>      rename a scene (key; keeps its label)
@@ -65,6 +66,10 @@
 #     belonging to other tools (e.g. shell.json.bak.opencode.*) are never touched.
 #        - catalog-derived fields (fed to QML): name <= 128, id <= 64, kinds <= 16 x 32
 #        - menu command/action lengths are bounded by the scene-key limit (<= 10 chars)
+#   * The .reopen-config marker is part of the same core: written with op_write (O_EXCL temp in the
+#     marker dir + descriptor-relative atomic rename) and cleared by plain unlink (rm(1) removes the
+#     link itself and never follows or truncates a pre-placed symlink target). The QML clears it via
+#     `omarchy-scene reopen-done`, never through shell redirection.
 #   * Requires python3 (stdlib only) for the O_NOFOLLOW/O_NONBLOCK openat machinery that
 #     bash redirection cannot express.
 #
@@ -1091,17 +1096,29 @@ cmd_rm_plugin() {  # $1 = scene, $2 = id（scene 可为 default）
   echo "removed $id from $scene"
 }
 
+cmd_reopen_done() {
+  # 清除“刷新后重开配置页”标记。rm(1) unlink 的是链接本身——绝不跟随符号链接、绝不截断其目标，
+  # 因此不存在 shell 重定向（printf > path）那种沿预置 symlink 写任意文件的漏洞。
+  rm -f -- "$CONFIG_DIR/.reopen-config"
+}
+
 cmd_refresh() {
   acquire_lock
   require_scenes
   # 先落“刷新后重开配置页”标记：rescanPlugins 会重建 max.scene 部件（配置面板随部件销毁），
   # 重建后的 Scene.qml 读到该标记即自动重新打开配置面板；rescan 失败则不保留标记。
-  printf '1' > "$CONFIG_DIR/.reopen-config"
+  # 标记写入经 secure_io（O_EXCL 同目录临时文件 + 描述符校验 + 原子 rename）。若目标已被预置成
+  # 符号链接/非常规文件，op_write 会拒绝（绝不像 printf '1' > 那样沿链接截断任意目标），
+  # 这里随即 unlink 该链接并报错终止——安全失败，而不是悄悄放过。
+  if ! printf '1' | write_atomic "$CONFIG_DIR/.reopen-config"; then
+    rm -f -- "$CONFIG_DIR/.reopen-config"
+    die "cannot write reopen marker: refusing non-regular .reopen-config (symlink/FIFO/device); removed it"
+  fi
   # 让 shell 重新发现插件（新安装/克隆的插件要先 rescan 才进 catalog）
   if omarchy-shell -q shell rescanPlugins >/dev/null 2>&1; then
     :
   else
-    rm -f "$CONFIG_DIR/.reopen-config"
+    rm -f -- "$CONFIG_DIR/.reopen-config"
   fi
   local managed; managed=$(managed_ids)
   snapshot_entries $(jq -r '.[]' <<<"$managed")
@@ -1231,6 +1248,10 @@ cmd_edit() {
   local editor="${EDITOR:-nano}"
   command -v "$editor" >/dev/null 2>&1 || editor=nano
   "$editor" "$SCENES_FILE"
+  # 编辑器退出后重读并校验：读路径仍走 descriptor 绑定 secure_io（拒绝符号链接/非常规文件、归用户所有、
+  # <= 8MiB、结构上限），随后重生成 ui-state.json 供 QML 消费。用户手改的内容只有通过这层校验才会
+  # 出现在界面上；JSON/结构破坏会在写入前中止（config_payload 失败 → 管道失败 → 不写 ui-state）。
+  regenerate_ui_state
 }
 
 # bar 标签轮询用: 只输出当前场景名 + 显示名
@@ -1503,6 +1524,7 @@ case "$cmd" in
   status) cmd_status "$@" ;;  menu-add) cmd_menu_add "$@" ;;
   menu-remove) cmd_menu_remove "$@" ;;
   edit) cmd_edit "$@" ;;
+  reopen-done) cmd_reopen_done "$@" ;;
   bar-status) cmd_bar_status "$@" ;;
   scenes) cmd_scenes_json "$@" ;;
   config) cmd_config_json "$@" ;;

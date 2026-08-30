@@ -26,6 +26,19 @@ Item {
     property string newSceneName: ""
     property string sceneIconText: ""          // 当前选中场景的图标（用于高亮）
     property bool sceneIconsExpanded: false    // 图标选择是否展开
+
+    // 与 CLI secure_io 同款上限（防御性二次校验；正常时 ui-state 已被 CLI 截断）
+    readonly property int maxBytes: 8 * 1024 * 1024
+    readonly property int maxScenes: 12
+    readonly property int maxPlugins: 1024
+    readonly property int maxLabelLen: 64
+    readonly property int maxIconLen: 4
+    readonly property int maxPluginNameLen: 128
+
+    // 剥掉富文本标记字符：PanelToolTip 等无法逐处设 Text.PlainText 的显示面也靠它兜底
+    function scrub(s) { return String(s == null ? "" : s).replace(/[<>]/g, "") }
+    // bash 单引号转义（正确处理内嵌引号/空白/元字符），所有文件/界面来源的参数都经它进 shell
+    function shq(v) { return Util.shellQuote(v) }
     property var sceneIcons: [                 // 预设图标库（Font Awesome 5 solid，字体 f000-f385 全部覆盖）
         { cp: "\uF015", label: "Home" },
         { cp: "\uF0F4", label: "Coffee" },
@@ -103,17 +116,54 @@ Item {
     function parseUiState() {
         var raw = uiFile.text() || ""
         if (!raw.trim()) return
+        if (raw.length > root.maxBytes) return   // 字节上限
         var o
         try { o = JSON.parse(raw) } catch (e) { return }
-        if (!o || typeof o !== "object") return
+        if (!o || typeof o !== "object" || Array.isArray(o)) return
 
-        root.cfgScenes = o.scenes || []
-        root.cfgPlugins = o.plugins || []
-        root.sceneIconText = root.sceneIcon(root.selectedScene)
+        // 场景：场景名只收 CLI 同款受控键（会进 shell 参数），label/icon 限长 + 剥富文本标记
+        var scenes = Array.isArray(o.scenes) ? o.scenes.slice(0, root.maxScenes) : []
+        var cs = []
+        for (var i = 0; i < scenes.length; i++) {
+            var sc = scenes[i] || {}
+            var n = String(sc.name == null ? "" : sc.name)
+            if (!/^[a-zA-Z0-9_-]{1,10}$/.test(n)) continue
+            cs.push({
+                name: n,
+                label: root.scrub(String(sc.label == null ? "" : sc.label)).slice(0, root.maxLabelLen) || n,
+                icon: root.scrub(String(sc.icon == null ? "" : sc.icon)).slice(0, root.maxIconLen),
+                active: !!sc.active,
+                count: Number(sc.count) || 0
+            })
+        }
+
+        // 插件：id 必须过 CLI 同款正则（它会被拼进 toggle-plugin/lock/unlock 的命令行参数），
+        // 名称剥富文本 + 限长（只用于显示）
+        var plugins = Array.isArray(o.plugins) ? o.plugins.slice(0, root.maxPlugins) : []
+        var cp = []
+        for (var j = 0; j < plugins.length; j++) {
+            var p = plugins[j] || {}
+            var pid = String(p.id == null ? "" : p.id)
+            if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(pid)) continue
+            cp.push({
+                id: pid,
+                name: root.scrub(String(p.name == null ? "" : p.name)).slice(0, root.maxPluginNameLen) || pid,
+                kinds: Array.isArray(p.kinds) ? p.kinds : [],
+                enabled: !!p.enabled,
+                firstParty: !!p.firstParty,
+                locked: !!p.locked,
+                inDefault: !!p.inDefault,
+                inScenes: Array.isArray(p.inScenes) ? p.inScenes : []
+            })
+        }
+
+        root.cfgScenes = cs
+        root.cfgPlugins = cp
+        root.sceneIconText = root.scrub(root.sceneIcon(root.selectedScene))
 
         var stillThere = false
-        for (var i = 0; i < root.cfgScenes.length; i++) {
-            if (root.cfgScenes[i].name === root.selectedScene) { stillThere = true; break }
+        for (var k = 0; k < root.cfgScenes.length; k++) {
+            if (root.cfgScenes[k].name === root.selectedScene) { stillThere = true; break }
         }
         if (!stillThere) root.selectedScene = "default"
         root.rebuildList(true)
@@ -161,17 +211,18 @@ Item {
 
     function setIcon(glyph) {
         var g = String(glyph || "").trim()
-        if (root.bar) root.bar.run(root.bin + " icon " + root.selectedScene + " '" + g.replace(/'/g, "") + "'")
+        if (root.bar) root.bar.run(root.bin + " icon " + root.shq(root.selectedScene) + " " + root.shq(g))
     }
 
     function togglePlugin(id, currentlyIn) {
-        if (root.bar) root.bar.run(root.bin + " toggle-plugin " + root.selectedScene + " " + id + " " + (currentlyIn ? "off" : "on"))
+        // id/场景名都经 shq 进 bash，绝不原样拼接（ui-state 虽是 CLI 校验后产物，文件本身仍可被改写）
+        if (root.bar) root.bar.run(root.bin + " toggle-plugin " + root.shq(root.selectedScene) + " " + root.shq(id) + " " + (currentlyIn ? "off" : "on"))
         // CLI 内部 = omarchy plugin enable/disable + 更新场景清单 + 重生成 ui-state.json → FileView 刷新
     }
 
     function toggleLock(id, currentlyLocked) {
         // 锁只对 default 场景的插件有意义：锁定后所有场景继承（始终启用）
-        if (root.bar) root.bar.run(root.bin + " " + (currentlyLocked ? "unlock" : "lock") + " " + id)
+        if (root.bar) root.bar.run(root.bin + " " + (currentlyLocked ? "unlock" : "lock") + " " + root.shq(id))
     }
 
     // 改名模式：把 TextField 变成“重命名选中场景”
@@ -194,11 +245,11 @@ Item {
         // 显示名允许字母/数字/空格/-/_，最多 10 字符
         if (!/^[a-zA-Z0-9 _-]+$/.test(n)) return
         if (n.length > 10) return
-        if (root.bar) root.bar.run(root.bin + " label " + root.selectedScene + " '" + n.replace(/'/g, "") + "'")
+        if (root.bar) root.bar.run(root.bin + " label " + root.shq(root.selectedScene) + " " + root.shq(n))
     }
 
     function applyAndSwitch() {
-        if (root.bar) root.bar.run(root.bin + " set " + root.selectedScene)
+        if (root.bar) root.bar.run(root.bin + " set " + root.shq(root.selectedScene))
         root.close()
     }
 
@@ -207,7 +258,7 @@ Item {
         if (!n || !/^[a-zA-Z0-9_-]+$/.test(n)) return
         if (n.length > 10) return   // 最多 10 字符
         if (root.cfgScenes.length > 5) return   // 最多 5 个自定义场景（含 default 共 6）
-        if (root.bar) root.bar.run(root.bin + " add " + n + " --label " + n)
+        if (root.bar) root.bar.run(root.bin + " add " + root.shq(n) + " --label " + root.shq(n))
         root.newSceneName = ""
         root.selectedScene = n
     }
@@ -217,7 +268,7 @@ Item {
         for (var i = 0; i < root.cfgScenes.length; i++) {
             if (root.cfgScenes[i].name === root.selectedScene && root.cfgScenes[i].active) return
         }
-        if (root.bar) root.bar.run(root.bin + " rm " + root.selectedScene)
+        if (root.bar) root.bar.run(root.bin + " rm " + root.shq(root.selectedScene))
         root.selectedScene = "default"
     }
 
@@ -357,6 +408,7 @@ Item {
                                     font.family: root.barFont
                                     font.pixelSize: Style.font.caption
                                     font.bold: (name === root.selectedScene)
+                                    textFormat: Text.PlainText
                                 }
                             }
                         }
@@ -441,6 +493,7 @@ Item {
                                 color: (ico.cp === root.sceneIconText) ? root.fg : (ico.hovered ? root.fg : root.dim)
                                 font.family: root.barFont
                                 font.pixelSize: Style.font.body
+                                textFormat: Text.PlainText
                             }
                             MouseArea {
                                 anchors.fill: parent
@@ -519,7 +572,7 @@ Item {
                         }
                     }
 
-                                        // ---- 插件勾选列表（所有非内置 + 内置） ----
+                    // ---- 插件勾选列表（所有非内置 + 内置） ----
                     Text {
                         width: parent.width
                         text: "Configure: " + root.sceneLabel(root.selectedScene)
@@ -527,6 +580,7 @@ Item {
                         font.family: root.barFont
                         font.pixelSize: Style.font.caption
                         font.bold: true
+                        textFormat: Text.PlainText
                     }
 
                     Text {
@@ -636,6 +690,7 @@ Item {
                                     font.bold: true
                                     elide: Text.ElideRight
                                     width: parent.width
+                                    textFormat: Text.PlainText
                                 }
                                 Text {
                                     text: modelData.id
@@ -646,6 +701,7 @@ Item {
                                     font.pixelSize: Style.font.caption
                                     elide: Text.ElideRight
                                     width: parent.width
+                                    textFormat: Text.PlainText
                                 }
                             }
 
@@ -773,6 +829,7 @@ Item {
                             font.pixelSize: Style.font.caption
                             elide: Text.ElideRight
                             width: Math.min(implicitWidth, parent.width * 0.4)
+                            textFormat: Text.PlainText
                         }
                     }
                 }

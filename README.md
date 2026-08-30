@@ -55,6 +55,12 @@ After `init`, `~/.config/omarchy/scenes/scenes.json` holds the scene
 definitions, `entries.json` caches plugin entry snapshots, and
 `ui-state.json` is the rendered state the panel's FileView watches.
 
+The bar widget and config panel only ever consume the CLI-validated
+`ui-state.json` payload — never the raw `scenes.json` directly. `edit`
+revalidates and refreshes that state when you close the editor; any other
+change to `scenes.json` shows up on the next `omarchy-scene` command that
+regenerates it (add/set/label/icon/refresh/…).
+
 ## Usage
 
 - Click the bar widget (or press `SUPER + SHIFT + S`) to switch scenes
@@ -128,6 +134,11 @@ All file I/O is **descriptor-bound** — there is no check-then-open anywhere:
   `^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`; `entries.json` ≤ 4096 records;
   catalog-derived fields (`name` ≤ 128, `id` ≤ 64, `kinds` ≤ 16×32); menu
   actions are bounded by the scene-key limit.
+- The `.reopen-config` refresh marker is written through the same
+  descriptor-bound core (O_EXCL temp + atomic rename): a pre-placed
+  symlink is refused, never followed or truncated. It is cleared by
+  `omarchy-scene reopen-done`, which unlinks the marker itself — neither
+  the CLI nor the widget ever uses shell redirection on that path.
 - Each scene remembers its exact bar layout (`_layouts` snapshots), so
   switching default ↔ dev restores the arrangement precisely every time and
   unmanaged built-in widgets (wifi/ai/audio/monitor/power, …) are never
@@ -141,14 +152,15 @@ deploy (the shell hot-reloads on save):
 
 ```sh
 ./sync.sh          # copy the runtime files to the live folder
-bash tests/run-tests.sh   # security/regression suite (97 checks)
+bash tests/run-tests.sh   # security/regression suite (112 checks)
 omarchy plugin validate .   # spec validation before pushing
 ```
 
 The test suite covers symlink rejection, TOCTOU swap races, FIFO
 non-blocking, oversized files, concurrent writers, backup collisions, menu
-shell-injection attempts, structural limit enforcement, lock safety, and
-byte-level round-trips — all in a sandboxed fake `$HOME` with stubbed
+shell-injection attempts, structural limit enforcement, lock safety,
+byte-level round-trips, layout stability, and reopen-marker symlink
+safety — all in a sandboxed fake `$HOME` with stubbed
 `omarchy`/`omarchy-shell` binaries.
 
 ## License
