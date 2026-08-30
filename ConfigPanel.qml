@@ -223,22 +223,28 @@ Item {
 
     function clearPending() { root.pendingOn = []; root.pendingOff = []; root.pendingRev = root.pendingRev + 1 }
 
-    // 插件在“当前编辑场景”的显示态：基础成员关系 + 未落盘的标记覆盖
-    function effScene(id) {
-        var inScene = root.pluginInScene(id)
-        if (root.pendingOff.indexOf(id) !== -1) inScene = false
-        if (root.pendingOn.indexOf(id) !== -1) inScene = true
-        return inScene
+    // 插件行的显示态：基础 = 实际生效态（锁定→系统默认；场景成员→开；不受管→回显系统 on/off），
+    // 叠加未落盘的标记覆盖。开关/文案显示都以此为准，避免不受管但启用的插件被误显示为 off。
+    function pendingEff(p) {
+        var base = root.pluginEffectiveOn(p)
+        if (root.pendingOn.indexOf(p.id) !== -1) base = true
+        if (root.pendingOff.indexOf(p.id) !== -1) base = false
+        return base
     }
 
     // 点开关：只翻转标记，不落盘、不改 shell.json
     function togglePending(id) {
+        var p = null
+        for (var i = 0; i < root.cfgPlugins.length; i++) {
+            if (root.cfgPlugins[i].id === id) { p = root.cfgPlugins[i]; break }
+        }
+        if (!p) return
         var onIdx = root.pendingOn.indexOf(id)
         var offIdx = root.pendingOff.indexOf(id)
-        var inScene = root.pluginInScene(id)
-        if (onIdx !== -1) inScene = true
-        if (offIdx !== -1) inScene = false
-        var wantOn = !inScene
+        var base = root.pluginEffectiveOn(p)
+        if (onIdx !== -1) base = true
+        if (offIdx !== -1) base = false
+        var wantOn = !base
         if (wantOn) {
             if (offIdx !== -1) root.pendingOff.splice(offIdx, 1)
             if (root.pendingOn.indexOf(id) === -1) root.pendingOn.push(id)
@@ -282,7 +288,10 @@ Item {
         if (root.bar) root.bar.run(root.bin + " label " + root.shq(root.selectedScene) + " " + root.shq(n))
     }
 
+    property bool applying: false          // 防重复触发（双击/按钮双事件）
     function applyAndSwitch() {
+        if (root.applying) return
+        root.applying = true
         // Apply & switch：把当前编辑场景的全部标记一次性落盘并切换（CLI apply 一次事务）
         var on = root.pendingOn.join(",")
         var off = root.pendingOff.join(",")
@@ -735,7 +744,7 @@ Item {
                                 }
                                 Text {
                                     text: modelData.id
-                                        + (root.pendingRev >= 0 && (modelData.locked ? root.pluginEffectiveOn(modelData) : root.effScene(modelData.id)) ? " · on" : " · off")
+                                        + (root.pendingRev >= 0 && root.pendingEff(modelData) ? " · on" : " · off")
                                         + (modelData.locked ? " · locked" : "")
                                         + (root.pendingRev >= 0 && (root.pendingOn.indexOf(modelData.id) !== -1 || root.pendingOff.indexOf(modelData.id) !== -1) ? " (pending)" : "")
                                     color: root.dim
@@ -755,13 +764,13 @@ Item {
                                 anchors.verticalCenter: parent.verticalCenter
                                 spacing: Style.space(4)
 
-                                // 开关：锁定的插件不显示（始终启用、不可开关）；未锁定 = 标记态（pending 预览）
+                                // 开关：锁定的插件不显示（始终启用、不可开关）；未锁定 = 显示实际生效态 + 标记覆盖
                                 ToggleSwitch {
                                     width: Style.space(38)
                                     height: Style.space(22)
                                     anchors.verticalCenter: parent.verticalCenter
                                     visible: !modelData.locked
-                                    checked: root.pendingRev >= 0 && root.effScene(modelData.id)
+                                    checked: root.pendingRev >= 0 && root.pendingEff(modelData)
                                     interactive: false
                                     foreground: root.fg
                                     accent: root.fg
