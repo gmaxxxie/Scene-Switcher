@@ -40,6 +40,26 @@ cafe, Focus at a desk — with one click or keypress instead of editing
 
 Requires `python3` (stdlib only — used for the descriptor-bound secure I/O core).
 
+The repository ships an idempotent `install.sh` that installs the plugin, the
+companion CLI at the path the widget calls, and bootstraps the scene config
+(`init` runs only when `scenes.json` does not exist yet — existing config is
+ever kept). Either:
+
+```sh
+# One command, straight from the marketplace (install.sh ships inside the
+# cloned plugin, so no repo checkout or curl|bash needed):
+omarchy plugin add https://github.com/gmaxxxie/Scene-Switcher.git --enable \
+  && "$HOME/.config/omarchy/plugins/max.scene/install.sh"
+```
+
+```sh
+# …or from a clone of this repository:
+git clone https://github.com/gmaxxxie/Scene-Switcher.git
+cd Scene-Switcher && ./install.sh
+```
+
+Manual, the same three steps are:
+
 ```sh
 # 1. Install the plugin (from the marketplace URL or this repository)
 omarchy plugin add https://github.com/gmaxxxie/Scene-Switcher.git --enable
@@ -58,8 +78,8 @@ After `init`, `~/.config/omarchy/scenes/scenes.json` holds the scene
 definitions, `entries.json` caches plugin entry snapshots, and
 `ui-state.json` is the rendered state the panel's FileView watches.
 
-To update a previous install, re-run the `install` step with the new
-`omarchy-scene`, or run `./sync.sh` from a fresh clone of this repository —
+To update a previous install, either re-run `install.sh` (skips what is
+already present) or run `./sync.sh` from a fresh clone of this repository —
 it deploys the plugin folder **and** reinstalls the CLI in one step (see
 Development).
 
