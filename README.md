@@ -23,9 +23,9 @@ cafe, Focus at a desk — with one click or keypress instead of editing
   scene tabs, create/rename/delete (max 5 custom scenes, names ≤10 chars),
   per-scene plugin toggles, lock/unlock buttons, and a preset icon picker
   (30 icons) for each scene
-- **Refresh plugins** — a ⟳ button at the top-right of the plugin list
-  (next to the "User plugins" header) rescans the plugin registry, so plugins
-  newly installed through `omarchy plugin add`/`clone` appear immediately
+- **Refresh plugins** — a ⟳ button at the bottom-left of the panel
+  rescans the plugin registry, so plugins newly installed through
+  `omarchy plugin add`/`clone` appear immediately
 - **Status echo** — each row shows the plugin's effective state: locked
   plugins and omarchy built-ins follow the system default; plugins in a scene
   show the scene switch state; unmanaged (new) plugins echo their system
@@ -55,6 +55,11 @@ After `init`, `~/.config/omarchy/scenes/scenes.json` holds the scene
 definitions, `entries.json` caches plugin entry snapshots, and
 `ui-state.json` is the rendered state the panel's FileView watches.
 
+To update a previous install, re-run the `install` step with the new
+`omarchy-scene`, or run `./sync.sh` from a fresh clone of this repository —
+it deploys the plugin folder **and** reinstalls the CLI in one step (see
+Development).
+
 The bar widget and config panel only ever consume the CLI-validated
 `ui-state.json` payload — never the raw `scenes.json` directly. `edit`
 revalidates and refreshes that state when you close the editor; any other
@@ -73,9 +78,12 @@ regenerates it (add/set/label/icon/refresh/…).
 omarchy-scene list                                    # scenes + members
 omarchy-scene set <scene>                             # switch (drop --dry-run to apply)
 omarchy-scene add <name> --label <label> --icon <glyph>
+omarchy-scene rename <old> <new>                      # rename a scene (keeps its label)
 omarchy-scene toggle-plugin <scene> <plugin-id> on|off
 omarchy-scene lock/unlock <plugin-id>                 # inherit everywhere / release
 omarchy-scene icon <scene> <glyph>                    # empty glyph clears the icon
+omarchy-scene status                                  # per-plugin current vs target state
+omarchy-scene refresh                                 # re-snapshot managed plugin entries
 omarchy-scene menu-add / menu-remove                  # bar menu submenu
 ```
 
@@ -137,8 +145,11 @@ All file I/O is **descriptor-bound** — there is no check-then-open anywhere:
 - The `.reopen-config` refresh marker is written through the same
   descriptor-bound core (O_EXCL temp + atomic rename): a pre-placed
   symlink is refused, never followed or truncated. It is cleared by
-  `omarchy-scene reopen-done`, which unlinks the marker itself — neither
-  the CLI nor the widget ever uses shell redirection on that path.
+  `omarchy-scene reopen-done`, which writes `0` back through the same
+  core (the marker stays a 1-byte regular file so the widget never sees a
+  missing-file read; a hostile symlink/FIFO marker is instead unlinked,
+  link-only) — neither the CLI nor the widget ever uses shell redirection
+  on that path.
 - Each scene remembers its exact bar layout (`_layouts` snapshots), so
   switching default ↔ dev restores the arrangement precisely every time and
   unmanaged built-in widgets (wifi/ai/audio/monitor/power, …) are never
@@ -151,7 +162,7 @@ This repository is the source of truth. The live plugin folder
 deploy (the shell hot-reloads on save):
 
 ```sh
-./sync.sh          # copy the runtime files to the live folder
+./sync.sh          # deploy the plugin folder + reinstall the CLI to ~/.local/bin
 bash tests/run-tests.sh   # security/regression suite (112 checks)
 omarchy plugin validate .   # spec validation before pushing
 ```
