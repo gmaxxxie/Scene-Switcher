@@ -44,8 +44,11 @@ Requires `python3` (stdlib only — used for the descriptor-bound secure I/O cor
 # 1. Install the plugin (from the marketplace URL or this repository)
 omarchy plugin add https://github.com/gmaxxxie/Scene-Switcher.git --enable
 
-# 2. Install the companion CLI (the widget delegates to it)
-install -Dm755 omarchy-scene "$HOME/.local/bin/omarchy-scene"
+# 2. Install the companion CLI from the cloned plugin folder.
+#    The bar widget calls it at exactly $HOME/.local/bin/omarchy-scene — the
+#    file was cloned with the plugin, so take it from there (not from the
+#    current directory, which is not the repository).
+install -Dm755 "$HOME/.config/omarchy/plugins/max.scene/omarchy-scene" "$HOME/.local/bin/omarchy-scene"
 
 # 3. Bootstrap the scene configuration (snapshots your currently enabled set)
 omarchy-scene init
