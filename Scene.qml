@@ -141,6 +141,9 @@ BarWidget {
         id: reopenMarker
         path: root.homeDir + "/.config/omarchy/scenes/.reopen-config"
         watchChanges: true
+        // 标记在平时不存在（reopen-done 已删除），启动/重建时首读报 ENOENT 属正常稳态，
+        // 不当作错误打点；内容校验在 onLoaded 里做（非 "1" 一律忽略）。
+        printErrors: false
         onLoaded: {
             if (!root.homeDir) return
             var txt = reopenMarker.text() || ""
