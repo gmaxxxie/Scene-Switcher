@@ -1097,9 +1097,14 @@ cmd_rm_plugin() {  # $1 = scene, $2 = id（scene 可为 default）
 }
 
 cmd_reopen_done() {
-  # 清除“刷新后重开配置页”标记。rm(1) unlink 的是链接本身——绝不跟随符号链接、绝不截断其目标，
-  # 因此不存在 shell 重定向（printf > path）那种沿预置 symlink 写任意文件的漏洞。
-  rm -f -- "$CONFIG_DIR/.reopen-config"
+  # 清除“刷新后重开配置页”标记：内容安全写回 "0"（保持文件存在，避免部件每次重建时
+  # FileView 首读不存在的路径刷 ENOENT 告警）。写入仍走 secure_io——若标记被预置成
+  # 符号链接/非常规文件，op_write 拒绝（绝不像 printf 那样沿链接截断任意目标），
+  # 这里退化为 unlink 链接本身（不跟随、不截断），并提示用户修复。
+  if ! printf '0' | write_atomic "$CONFIG_DIR/.reopen-config" 2>/dev/null; then
+    rm -f -- "$CONFIG_DIR/.reopen-config"
+    echo "omarchy-scene: warning: removed non-regular .reopen-config (symlink/FIFO/device); check the file" >&2
+  fi
 }
 
 cmd_refresh() {

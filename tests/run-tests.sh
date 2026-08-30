@@ -16,7 +16,7 @@
 #   T11 锁文件安全（拒绝符号链接锁文件；flock 互斥）
 #   T12 字节级往返一致性（读回内容与写入完全一致）
 #   T13 场景切换布局稳定（未受管内置部件不被挤走）
-#   T14 reopen 标记安全（写入经 secure_io；符号链接标记拒绝写入且只 unlink 清除）
+#   T14 reopen 标记安全（写入经 secure_io；清除安全写 0 保持常规文件；符号链接标记拒绝写入且只 unlink）
 #
 # 运行: bash tests/run-tests.sh   （结果非零退出码表示有失败）
 #
@@ -685,7 +685,7 @@ JSON
 # ---------------------------------------------------------------- T14 reopen 标记安全
 
 t14_reopen_marker() {
-  echo "T14 .reopen-config 标记：写入经 secure_io，清除只 unlink"
+  echo "T14 .reopen-config 标记：写入经 secure_io，清除安全写 0，符号链接只 unlink"
   setup_env
   "$SCENE" init >/dev/null 2>&1
 
@@ -698,9 +698,13 @@ t14_reopen_marker() {
     bad "标记缺失/是链接/内容异常: $(ls -la "$OMARCHY_SCENES_DIR" 2>/dev/null | grep -i reopen || echo missing)"
   fi
 
-  # 14b. reopen-done 清除标记（plain unlink）
+  # 14b. reopen-done 安全写回 0（文件保持存在，避免 FileView 启动时 ENOENT 告警）
   expect "reopen-done 清除标记" "$SCENE" reopen-done
-  if [[ ! -e "$OMARCHY_SCENES_DIR/.reopen-config" ]]; then ok "标记已清除"; else bad "标记仍存在"; fi
+  if [[ -f "$OMARCHY_SCENES_DIR/.reopen-config" && "$(cat "$OMARCHY_SCENES_DIR/.reopen-config")" == "0" ]]; then
+    ok "标记写回 0（常规文件仍在）"
+  else
+    bad "标记未写回 0: $(cat "$OMARCHY_SCENES_DIR/.reopen-config" 2>/dev/null || echo missing)"
+  fi
 
   # 14c. 预置符号链接标记 → refresh 拒绝且绝不经链接写入，目标文件不被截断
   printf 'PRECIOUS' > "$WORK/victim-reopen"
@@ -719,14 +723,14 @@ t14_reopen_marker() {
     bad "失败后链接残留"
   fi
 
-  # 14d. reopen-done 对符号链接标记也只 unlink 链接本身，不触碰目标
+  # 14d. reopen-done 遇符号链接标记：secure_io 拒绝写入 → 退化为 unlink 链接本身，不触碰目标
   rm -f "$OMARCHY_SCENES_DIR/.reopen-config"
   ln -s "$WORK/victim-reopen" "$OMARCHY_SCENES_DIR/.reopen-config"
   expect "reopen-done 清除符号链接标记" "$SCENE" reopen-done
   if [[ "$(cat "$WORK/victim-reopen")" == "PRECIOUS" && ! -e "$OMARCHY_SCENES_DIR/.reopen-config" ]]; then
     ok "reopen-done 只 unlink 链接，目标完好"
   else
-    bad "reopen-done 行为异常"
+    bad "reopen-done 行为异常（目标=$WORK/victim-reopen 残留: $(cat "$WORK/victim-reopen" 2>/dev/null) / 链接还在: $(ls -la "$OMARCHY_SCENES_DIR/.reopen-config" 2>/dev/null || echo no)"
   fi
 
   # 14e. 干净环境下 refresh 成功且标记再次为常规文件
