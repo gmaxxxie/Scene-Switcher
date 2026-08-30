@@ -49,7 +49,7 @@ Requires `python3` (stdlib only — used for the descriptor-bound secure I/O cor
 The repository ships an idempotent `install.sh` that installs the plugin, the
 companion CLI at the path the widget calls, and bootstraps the scene config
 (`init` runs only when `scenes.json` does not exist yet — existing config is
-ever kept). Either:
+always kept). Either:
 
 ```sh
 # One command, straight from the marketplace (install.sh ships inside the
@@ -99,14 +99,38 @@ regenerates it (add/set/label/icon/refresh/…).
 
 - Click the bar widget (or press `SUPER + SHIFT + S`) to switch scenes
 - Click the ⚙ button in the popup to open the configuration panel
-- Pick the scene tab, toggle plugins, lock/unlock, set an icon, then Apply
+- Pick the scene tab, toggle plugins, lock/unlock, set an icon, then press
+  **Apply & switch** — toggles are only **marks** until then
+
+## How scenes compose
+
+- **default** is the base set — `init` snapshots your currently enabled
+  **user** plugins (omarchy built-ins are never snapshotted; they stay
+  unmanaged and follow the system state). The default set's plugins stay
+  enabled in **every** scene.
+- **locked** plugins are inherited everywhere too (always on) — lock a
+  plugin to pin it to all scenes, on top of the default base.
+- **scene-specific** plugins belong to one scene and switch with it.
+- **unmanaged** plugins (in no scene, not locked — including omarchy
+  built-ins) are never touched by scene switches; they keep whatever state
+  they have.
+
+So switching to a scene runs **default + locked + that scene's plugins**.
+To stop a plugin everywhere, remove it from the default set
+(`omarchy-scene rm-plugin default <id>`) and disable it at the shell level.
+
+Toggling a plugin switch in the config panel only **marks** it (row shows a
+`(pending)` suffix). **Apply & switch** commits all pending marks in one
+transaction via `omarchy-scene apply <scene> --on <ids> --off <ids>`:
+enable/disable, scene membership, then switch. Marks are discarded when you
+switch scene tabs or the panel data refreshes.
 
 ## Configure
 
 ```sh
 omarchy-scene list                                    # scenes + members
 omarchy-scene set <scene>                             # switch (drop --dry-run to apply)
-omarchy-scene apply <scene> --on <ids> --off <ids>     # apply marked toggles + switch (panel)
+omarchy-scene apply <scene> --on <ids> --off <ids> # apply marked toggles + switch (panel)
 omarchy-scene add <name> --label <label> --icon <glyph>
 omarchy-scene rename <old> <new>                      # rename a scene (keeps its label)
 omarchy-scene toggle-plugin <scene> <plugin-id> on|off
