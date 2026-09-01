@@ -38,7 +38,9 @@ cafe, Focus at a desk — with one click or keypress instead of editing
 - **Locked plugins** — locked plugins are inherited by every scene (always on),
   on top of the default base set; omarchy built-ins are listed after user
   plugins, locked by default and following the system state — unlock them to
-  manage manually
+  manage manually. A locked built-in that is currently **off** (e.g. a
+  disabled Tailscale) stays visible in every scene tab instead of being
+  hidden, so you can always find and re-enable it
 - **Keybinding** — `SUPER + SHIFT + T` cycles scenes
   (`SUPER + SHIFT + S` is omarchy's default screenshot/Google-Maps shortcut, so
   the scene binding deliberately avoids it; change the line in
@@ -136,11 +138,21 @@ once with `omarchy-scene init --force` (the old file is backed up first).
 - **scene-specific** plugins belong to one scene and switch with it.
 - **unmanaged** plugins (in no scene, not locked — including omarchy
   built-ins) are never touched by scene switches; they keep whatever state
-  they have.
+  they have. A widget you enable or install *after* a scene's layout was
+  snapshotted is never dropped: switching scenes preserves any known
+  widget that is currently in the bar, even if the scene's saved layout
+  predates it (ghost widgets that are no longer in the plugin catalog are
+  not carried into other scenes).
 
 So switching to a scene runs **default + locked + that scene's plugins**.
 To stop a plugin everywhere, remove it from the default set
 (`omarchy-scene rm-plugin default <id>`) and disable it at the shell level.
+
+If a bar widget you expect everywhere (e.g. the Tailscale icon) disappears
+when you switch scenes, it was probably unlocked and added to one scene
+only — the panel's default-scene view is the place to manage built-ins:
+keep it **locked** to make it follow the system state (always in the bar
+while enabled at the shell level, in every scene).
 
 Toggling a plugin switch in the config panel only **marks** it (row shows a
 `(pending)` suffix). **Apply & switch** commits all pending marks in one
@@ -242,7 +254,7 @@ deploy (the shell hot-reloads on save):
 
 ```sh
 ./sync.sh          # deploy the plugin folder + reinstall the CLI to ~/.local/bin
-bash tests/run-tests.sh   # security/regression suite (135 checks)
+bash tests/run-tests.sh   # security/regression suite (139 checks)
 omarchy plugin validate .   # spec validation before pushing
 ```
 

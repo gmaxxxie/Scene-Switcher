@@ -18,6 +18,8 @@
 #   T13 场景切换布局稳定（未受管内置部件不被挤走）
 #   T14 reopen 标记安全（写入经 secure_io；清除安全写 0 保持常规文件；符号链接标记拒绝写入且只 unlink）
 #   T15 新装继承（default 为基准集，各场景继承 default+locked；内置不受管，系统状态不被场景切换破坏）
+#   T16 apply: 面板标记批量落盘 + 切换（一次事务）
+#   T17 陈旧 _layouts 快照不刷掉后启用的未受管部件（tailscale 回归）
 #
 # 运行: bash tests/run-tests.sh   （结果非零退出码表示有失败）
 #
@@ -877,6 +879,59 @@ t16_apply_pending() {
   echo "  (T16 done)"
 }
 
+# ---------------------------------------------------------------- T17 陈旧快照不刷掉未受管部件
+
+# 真实故障回归（tailscale 被刷不见）: 某场景的 _layouts 快照早于用户后来手动启用/安装的
+# 未受管 bar 部件（如 omarchy.tailscale）。旧代码在切到该场景时用陈旧快照整体替换 bar 布局，
+# 把后装的部件从 bar 刷掉；修复后应把当前 bar 里“未受管且快照缺失”的部件合并回快照并保留。
+
+t17_stale_layout_keeps_unmanaged() {
+  echo "T17 陈旧布局快照不刷掉后启用的未受管部件（tailscale 回归）"
+  setup_env
+  export HOME="$WORK/home" OMARCHY_SCENES_DIR="$WORK/cfg/scenes" PATH="$WORK/bin:$PATH"
+  # catalog: 内置 bar-widget（tray / tailscale，均未受管）+ 用户场景插件 user.focus
+  cat > "$WORK/bin/omarchy" <<SH
+#!/usr/bin/env bash
+case "\$1 \$2" in
+  "plugin list")
+    cat <<'J'
+[{"id":"omarchy.tray","name":"Tray","kinds":["bar-widget"],"enabled":true,"firstParty":true},
+ {"id":"omarchy.tailscale","name":"Tailscale","kinds":["bar-widget"],"enabled":true,"firstParty":true},
+ {"id":"user.focus","name":"Focus","kinds":["bar-widget"],"enabled":false,"firstParty":false}]
+J
+    ;;
+  plugin\ enable*) exit 0 ;;
+  plugin\ disable*) exit 0 ;;
+  *) exit 0 ;;
+esac
+SH
+  chmod +x "$WORK/bin/omarchy"
+  # shell.json: tray + 后装的 tailscale 在 bar（另含一个目录未知的幽灵部件 dev.ghost）
+  cat > "$WORK/home/.config/omarchy/shell.json" <<'JSON'
+{"version":1,"bar":{"layout":{"left":[],"center":[],"right":[{"id":"omarchy.tray"},{"id":"omarchy.tailscale"}]}},"plugins":[],"disabledPlugins":[]}
+JSON
+  # scenes.json: dev 场景的陈旧布局快照缺失 tailscale（真实数据形态：快照早于安装）；
+  # 幽灵部件 dev.ghost 只存在于 dev 的陈旧快照里（目录未知 → 不得被合并回任何场景）
+  cat > "$OMARCHY_SCENES_DIR/scenes.json" <<'JSON'
+{"version":1,"current":"default","default":[],"locked":[],"unlockedBuiltins":[],"scenes":{"dev":{"label":"Dev","plugins":["user.focus"]}},"_layouts":{"dev":{"left":[],"center":[],"right":[{"id":"omarchy.tray"},{"id":"dev.ghost"}]}}}
+JSON
+  printf '{}' > "$OMARCHY_SCENES_DIR/entries.json"
+
+  right() { jq -r '.bar.layout.right | map(.id) | join(",")' "$WORK/home/.config/omarchy/shell.json"; }
+  if ! "$SCENE" set dev >/dev/null 2>&1; then bad "set dev 失败"; return; fi
+  # tailscale 应留在 bar（在 tray 之后原位），user.focus 作为场景插件追加；
+  # dev.ghost 本就存在于 dev 的陈旧快照里（目录未知），只随 dev 的快照保留、不被目录外的合并逻辑带出
+  assert_eq "切换 dev 后 tailscale 仍在 bar" "$(right)" "omarchy.tray,omarchy.tailscale,dev.ghost,user.focus"
+  expect "_layouts.dev 已记录 tailscale" sh -c "jq -e '._layouts.dev.right[] | select(.id == \"omarchy.tailscale\")' '$OMARCHY_SCENES_DIR/scenes.json' >/dev/null"
+  # 切回 default：幽灵 dev.ghost 不得被合并进 default 的 bar（只保留目录已知的 tailscale）
+  "$SCENE" set default >/dev/null 2>&1
+  assert_eq "切回 default 不携带幽灵部件" "$(right)" "omarchy.tray,omarchy.tailscale"
+  # 往返再进 dev，逐轮保持
+  "$SCENE" set dev >/dev/null 2>&1
+  assert_eq "第二轮切换 dev 后 tailscale 仍在 bar" "$(right)" "omarchy.tray,omarchy.tailscale,dev.ghost,user.focus"
+  echo "  (T17 done)"
+}
+
 # ---------------------------------------------------------------- 汇总
 
 summary() {
@@ -908,4 +963,5 @@ t13_layout_stability
 t14_reopen_marker
 t15_inheritance
 t16_apply_pending
+t17_stale_layout_keeps_unmanaged
 summary

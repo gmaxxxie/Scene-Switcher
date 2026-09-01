@@ -934,10 +934,33 @@ set_diff() {  # $1 = scene；$2 = quiet（不打印）
   cur_scene=$(jq -r '.current // "default"' <<<"$SCENES_DOC")
   cur_layout=$(jq -c '.bar.layout // {left: [], center: [], right: []}' <<<"$shell_doc")
   # 若目标场景已有布局快照，则以其为起始布局再跑 transform（快照里的受管部件已就位，
-  # insert_widget 全部 no-op，未受管内置部件保持在快照位置，成员关系仍由 transform 强制）
+  # insert_widget 全部 no-op，未受管内置部件保持在快照位置，成员关系仍由 transform 强制）。
+  # 但快照可能早于用户后来手动启用/安装的部件——因此先把当前 bar 里“未受管、目录已知、
+  # 且快照缺失”的部件合并回快照（保留其在当前 bar 的位置），绝不因陈旧快照把后来启用的
+  # 部件（如 tailscale）从 bar 刷掉。目录未知的幽灵部件（如 io.omarchy.share）不会被合并进
+  # 目标场景，避免把上一个场景的残留部件带进下一个场景。受管部件去留仍由 transform 决定。
   cached_layout=$(jq -r --arg s "$scene" '._layouts[$s] // null' <<<"$SCENES_DOC")
   if [[ "$cached_layout" != "null" && -n "$cached_layout" ]]; then
-    seeded_shell=$(jq --argjson lay "$cached_layout" '.bar.layout = $lay' <<<"$shell_doc")
+    merged_layout=$(jq -n \
+      --argjson cached "$cached_layout" \
+      --argjson live "$shell_doc" \
+      --argjson managed "$managed" \
+      --argjson catalog "$catalog" '
+        def unmanaged($id): ($managed | index($id)) == null;
+        def known($id): ($catalog | has($id)) == true;
+        def present($lay; $id): ([($lay[] | .id // "")] | index($id)) != null;
+        def merge_section($s):
+          reduce (($live.bar.layout[$s] // []) | to_entries[]) as $e (.;
+            if ((($e.value.id // "") != "")
+                and unmanaged($e.value.id)
+                and known($e.value.id)
+                and (present(.[$s]; $e.value.id) | not))
+            then .[$s] |= (([$e.key, length] | min) as $at | .[0:$at] + [$e.value] + .[$at:])
+            else . end);
+        { left: ($cached.left // []), center: ($cached.center // []), right: ($cached.right // []) }
+        | merge_section("left") | merge_section("center") | merge_section("right")
+      ')
+    seeded_shell=$(jq --argjson lay "$merged_layout" '.bar.layout = $lay' <<<"$shell_doc")
   else
     seeded_shell="$shell_doc"
   fi
@@ -986,9 +1009,14 @@ activate_scene() {  # $1 = scene
   jq -e . <<<"$DIFF_SHELL" >/dev/null || die "transform produced invalid JSON, write aborted"
   secure_backup "$SHELL_JSON" >/dev/null
   printf '%s\n' "$DIFF_SHELL" | write_atomic "$SHELL_JSON"
-  # 4) 记录当前场景 + 离开前场景的布局快照（单次原子写；下次进入该场景时精确还原）
-  jq --arg c "$DIFF_CUR_SCENE" --arg s "$scene" --argjson lay "$DIFF_CUR_LAYOUT" \
-    '.current = $s | ._layouts[$c] = $lay' <<<"$SCENES_DOC" | write_atomic "$SCENES_FILE"
+  # 4) 记录当前场景 + 离开前场景的布局快照 + 本次实际应用的布局（单次原子写）。
+  #    同时刷新 _layouts[$scene] 为本次真正应用的布局，避免陈旧快照（缺失后来启用的
+  #    未受管部件如 tailscale）在下次进入该场景时把部件刷掉；自切换（apply 到当前场景）时
+  #    $c == $s，$newlay 后写覆盖，即本次应用态。
+  local new_layout
+  new_layout=$(jq -c '.bar.layout' <<<"$DIFF_SHELL")
+  jq --arg c "$DIFF_CUR_SCENE" --arg s "$scene" --argjson lay "$DIFF_CUR_LAYOUT" --argjson newlay "$new_layout" \
+    '.current = $s | ._layouts[$c] = $lay | ._layouts[$s] = $newlay' <<<"$SCENES_DOC" | write_atomic "$SCENES_FILE"
   regenerate_ui_state
   reload_shell
   notify "Scene switched" "$scene"

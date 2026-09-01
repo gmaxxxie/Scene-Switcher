@@ -95,6 +95,9 @@ Item {
     // 根据当前编辑场景，计算要显示的插件列表：
     //  - 默认场景：全部显示（含锁定，可加/解锁）
     //  - 其它场景：隐藏锁定的插件（它们被所有场景继承、始终启用，无需在此显示）
+    //    例外：锁定的 omarchy 内置如果当前处于“系统关闭”状态（如 tailscale）仍显示——
+    //    “锁定”只是跟随系统状态，并不保证开启；隐藏它会让用户看不到某个部件其实是关的，
+    //    也没法在这里把它找回来重新打开（要去默认场景视图解锁后开关）。
     // preserveScroll=true 时保留列表滚动位置（切换插件开关后不跳回顶部）
     function rebuildList(preserveScroll) {
         root.listRev = root.listRev + 1
@@ -104,7 +107,7 @@ Item {
         var out = []
         for (var i = 0; i < root.cfgPlugins.length; i++) {
             var p = root.cfgPlugins[i]
-            if (!isDefault && p.locked) continue
+            if (!isDefault && p.locked && !(p.firstParty && !p.enabled)) continue
             out.push(p)
         }
         root.visiblePlugins = out
