@@ -261,11 +261,14 @@ All file I/O is **descriptor-bound** — there is no check-then-open anywhere:
 
 This repository is the source of truth. The live plugin folder
 (`~/.config/omarchy/plugins/max.scene`) is a deployed copy — edit here, then
-deploy (the shell hot-reloads on save):
+deploy, then restart the shell once so the running bar widget reloads the new
+`Scene.qml` (rescanPlugins re-walks the plugin dirs but does not rebuild an
+already-running bar widget):
 
 ```sh
 ./sync.sh          # deploy the plugin folder + reinstall the CLI to ~/.local/bin
-bash tests/run-tests.sh   # security/regression suite (139 checks)
+omarchy-restart-shell   # reload the bar widget from disk (needed once per deploy)
+bash tests/run-tests.sh   # security/regression suite
 omarchy plugin validate .   # spec validation before pushing
 ```
 
