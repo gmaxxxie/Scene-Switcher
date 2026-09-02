@@ -135,6 +135,33 @@ automatically — no migration needed. If your `scenes.json` was created by an
 older `init` and still lists omarchy built-ins in `default`, re-snapshot it
 once with `omarchy-scene init --force` (the old file is backed up first).
 
+## Update with an AI agent
+
+Managing this machine with an AI coding agent (pi, OpenCode, Codex, …)? Paste
+the block below — it runs the exact one-command update above, keeps your
+`scenes.json`, and verifies the result. The two hard constraints are in the
+prompt on purpose: **never remove & reinstall the plugin**, and **stop and
+report instead of guessing**.
+
+> Update the omarchy plugin `max.scene` (Scene Switcher) to the latest
+> version.
+>
+> 1. Check current state: run `md5sum` on
+>    `~/.config/omarchy/plugins/max.scene/omarchy-scene` and
+>    `~/.local/bin/omarchy-scene`, and `grep version` on
+>    `~/.config/omarchy/plugins/max.scene/manifest.json`.
+> 2. Update the plugin files: `omarchy plugin update max.scene --yes`.
+> 3. Reinstall the companion CLI:
+>    `"$HOME/.config/omarchy/plugins/max.scene/install.sh"` (idempotent —
+>    skips `add` and `init`, never touches `scenes.json`).
+> 4. Re-run the checks from step 1 and confirm the two md5s match and the
+>    version is the latest; report both outputs back.
+>
+> Constraints: never remove/reinstall the plugin (`omarchy plugin remove` is
+> forbidden), preserve `scenes.json`, and if any step errors, stop and paste
+> the error instead of guessing. No shell restart is needed unless the
+> update touched `Scene.qml`/`ConfigPanel.qml`.
+
 ## Usage
 
 - Click the bar widget (or press `SUPER + SHIFT + T`) to switch scenes
