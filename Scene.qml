@@ -103,7 +103,10 @@ BarWidget {
     }
 
     function refreshCache() {
-        if (root.bar) root.bar.run(root.bin + " refresh")
+        // 只刷新缓存：加 --no-reopen，避免刷新后 shell 重建部件时经 .reopen-config 标记
+        // 自动弹出配置面板——那是配置面板“refresh plugins”按钮（保留弹窗）的行为，
+        // 切换弹层的这个按钮只应刷缓存、不弹配置页。
+        if (root.bar) root.bar.run(root.bin + " refresh --no-reopen")
         root.close()
     }
 

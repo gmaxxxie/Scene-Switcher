@@ -22,7 +22,8 @@
 #   omarchy-scene rm <name>           delete a scene
 #   omarchy-scene add-plugin <scene> <plugin-id>  add a plugin to a scene
 #   omarchy-scene rm-plugin <scene> <plugin-id>   remove a plugin from a scene
-#   omarchy-scene refresh             re-snapshot all managed plugin entries
+#   omarchy-scene refresh [--no-reopen]  re-snapshot all managed plugin entries
+#                                     (--no-reopen: just refresh, don't auto-reopen the config panel)
 #   omarchy-scene menu-add            write the Scenes submenu into omarchy-menu.jsonc
 #   omarchy-scene menu-remove         remove the Scenes submenu
 #   omarchy-scene edit                open scenes.json with $EDITOR (revalidates + refreshes the panel)
@@ -1157,21 +1158,33 @@ cmd_reopen_done() {
 }
 
 cmd_refresh() {
+  local reopen=1
+  [[ ${1:-} == "--no-reopen" ]] && reopen=0
   acquire_lock
   require_scenes
-  # 先落“刷新后重开配置页”标记：rescanPlugins 会重建 max.scene 部件（配置面板随部件销毁），
-  # 重建后的 Scene.qml 读到该标记即自动重新打开配置面板；rescan 失败则不保留标记。
-  # 标记写入经 secure_io（O_EXCL 同目录临时文件 + 描述符校验 + 原子 rename）。若目标已被预置成
-  # 符号链接/非常规文件，op_write 会拒绝（绝不像 printf '1' > 那样沿链接截断任意目标），
-  # 这里随即 unlink 该链接并报错终止——安全失败，而不是悄悄放过。
-  if ! printf '1' | write_atomic "$CONFIG_DIR/.reopen-config"; then
-    rm -f -- "$CONFIG_DIR/.reopen-config"
-    die "cannot write reopen marker: refusing non-regular .reopen-config (symlink/FIFO/device); removed it"
+  if [[ $reopen -eq 1 ]]; then
+    # 先落“刷新后重开配置页”标记：rescanPlugins 会重建 max.scene 部件（配置面板随部件销毁），
+    # 重建后的 Scene.qml 读到该标记即自动重新打开配置面板；rescan 失败则不保留标记。
+    # 标记写入经 secure_io（O_EXCL 同目录临时文件 + 描述符校验 + 原子 rename）。若目标已被预置成
+    # 符号链接/非常规文件，op_write 会拒绝（绝不像 printf '1' > 那样沿链接截断任意目标），
+    # 这里随即 unlink 该链接并报错终止——安全失败，而不是悄悄放过。
+    if ! printf '1' | write_atomic "$CONFIG_DIR/.reopen-config"; then
+      rm -f -- "$CONFIG_DIR/.reopen-config"
+      die "cannot write reopen marker: refusing non-regular .reopen-config (symlink/FIFO/device); removed it"
+    fi
+  else
+    # 切换弹层的“refresh plugin cache”按钮走这里：只刷缓存、不弹配置面板。
+    # 关键：除了不写 “1”，还要把标记写回 “0”——清掉任何遗留的 “1”（例如此前配置页刷新
+    # 留下的），否则重建后的部件仍会读到 “1” 而误弹配置面板。与 reopen-done 同一条安全路径：
+    # 常规文件写 “0”；符号链接/非常规标记只 unlink 链接本身（不跟随、不截断），此处尽力而为不报错。
+    if ! printf '0' | write_atomic "$CONFIG_DIR/.reopen-config" 2>/dev/null; then
+      rm -f -- "$CONFIG_DIR/.reopen-config"
+    fi
   fi
   # 让 shell 重新发现插件（新安装/克隆的插件要先 rescan 才进 catalog）
   if omarchy-shell -q shell rescanPlugins >/dev/null 2>&1; then
     :
-  else
+  elif [[ $reopen -eq 1 ]]; then
     rm -f -- "$CONFIG_DIR/.reopen-config"
   fi
   local managed; managed=$(managed_ids)

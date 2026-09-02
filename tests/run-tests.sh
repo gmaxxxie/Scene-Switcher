@@ -16,7 +16,7 @@
 #   T11 锁文件安全（拒绝符号链接锁文件；flock 互斥）
 #   T12 字节级往返一致性（读回内容与写入完全一致）
 #   T13 场景切换布局稳定（未受管内置部件不被挤走）
-#   T14 reopen 标记安全（写入经 secure_io；清除安全写 0 保持常规文件；符号链接标记拒绝写入且只 unlink）
+#   T14 reopen 标记安全（写入经 secure_io；清除安全写 0 保持常规文件；符号链接标记拒绝写入且只 unlink；--no-reopen 不写标记）
 #   T15 新装继承（default 为基准集，各场景继承 default+locked；内置不受管，系统状态不被场景切换破坏）
 #   T16 apply: 面板标记批量落盘 + 切换（一次事务）
 #   T17 陈旧 _layouts 快照不刷掉后启用的未受管部件（tailscale 回归）
@@ -742,6 +742,24 @@ t14_reopen_marker() {
     ok "最终标记为常规文件"
   else
     bad "最终标记异常"
+  fi
+
+  # 14f. --no-reopen 刷新清掉遗留标记（切换弹层的 refresh plugin cache：只刷缓存、绝不弹配置页）
+  expect "refresh 写标记=1（模拟配置页遗留）" "$SCENE" refresh
+  expect "refresh --no-reopen（切换弹层入口）" "$SCENE" refresh --no-reopen
+  if [[ -f "$OMARCHY_SCENES_DIR/.reopen-config" && ! -L "$OMARCHY_SCENES_DIR/.reopen-config" \
+       && "$(cat "$OMARCHY_SCENES_DIR/.reopen-config")" == "0" ]]; then
+    ok "refresh --no-reopen 已把遗留标记清为 0"
+  else
+    bad "refresh --no-reopen 应清为 0（当前: $(cat "$OMARCHY_SCENES_DIR/.reopen-config" 2>/dev/null || echo missing)）"
+  fi
+
+  # 14g. 默认 refresh 仍写重开标记（配置面板的 refresh plugins 刷新后继续显示弹窗）
+  expect "refresh（默认写重开标记）" "$SCENE" refresh
+  if [[ -f "$OMARCHY_SCENES_DIR/.reopen-config" && "$(cat "$OMARCHY_SCENES_DIR/.reopen-config")" == "1" ]]; then
+    ok "默认 refresh 仍写重开标记"
+  else
+    bad "默认 refresh 应写重开标记（当前: $(cat "$OMARCHY_SCENES_DIR/.reopen-config" 2>/dev/null || echo missing)）"
   fi
   echo "  (T14 done)"
 }

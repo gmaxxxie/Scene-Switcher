@@ -30,7 +30,13 @@ cafe, Focus at a desk — with one click or keypress instead of editing
   suffix; switching scene tabs or data refreshes discard unapplied marks)
 - **Refresh plugins** — a ⟳ button at the bottom-left of the panel
   rescans the plugin registry, so plugins newly installed through
-  `omarchy plugin add`/`clone` appear immediately
+  `omarchy plugin add`/`clone` appear immediately. It keeps the panel open
+  after the rescan (the widget is rebuilt in the background and the panel
+  reopens automatically)
+- **Refresh plugin cache** — the ⟳ button in the switch popup runs the
+  same rescan but only refreshes the cache: it does **not** open the config
+  panel. Only the panel's **Refresh plugins** reopens the dialog after
+  refreshing
 - **Status echo** — each row shows the plugin's effective state: locked
   plugins and omarchy built-ins follow the system default; plugins in a scene
   show the scene switch state; unmanaged (new) plugins echo their system
@@ -172,7 +178,8 @@ omarchy-scene toggle-plugin <scene> <plugin-id> on|off
 omarchy-scene lock/unlock <plugin-id>                 # inherit everywhere / release
 omarchy-scene icon <scene> <glyph>                    # empty glyph clears the icon
 omarchy-scene status                                  # per-plugin current vs target state
-omarchy-scene refresh                                 # re-snapshot managed plugin entries
+omarchy-scene refresh [--no-reopen]                # re-snapshot managed plugin entries
+                                  # (--no-reopen: refresh only, don't reopen the config panel)
 omarchy-scene menu-add / menu-remove                  # bar menu submenu
 ```
 
@@ -235,8 +242,12 @@ All file I/O is **descriptor-bound** — there is no check-then-open anywhere:
   actions are bounded by the scene-key limit.
 - The `.reopen-config` refresh marker is written through the same
   descriptor-bound core (O_EXCL temp + atomic rename): a pre-placed
-  symlink is refused, never followed or truncated. It is cleared by
-  `omarchy-scene reopen-done`, which writes `0` back through the same
+  symlink is refused, never followed or truncated. `refresh --no-reopen`
+  (used by the switch popup's cache button) writes the marker back to `0`,
+  clearing any stale `1` so only the panel's **Refresh plugins** ever
+  reopens the dialog after a rescan. It is
+  cleared by `omarchy-scene reopen-done`, which writes `0` back through
+  the same
   core (the marker stays a 1-byte regular file so the widget never sees a
   missing-file read; a hostile symlink/FIFO marker is instead unlinked,
   link-only) — neither the CLI nor the widget ever uses shell redirection
