@@ -40,7 +40,9 @@ cafe, Focus at a desk — with one click or keypress instead of editing
 - **Status echo** — each row shows the plugin's effective state: locked
   plugins and omarchy built-ins follow the system default; plugins in a scene
   show the scene switch state; unmanaged (new) plugins echo their system
-  default on/off
+  default on/off. Disabling an unmanaged plugin (e.g. herdr) sticks across
+  Apply & switch — the stale per-scene layout snapshot no longer resurrects
+  it, so unmanaged plugins truly follow the system state
 - **Locked plugins** — locked plugins are inherited by every scene (always on),
   on top of the default base set; omarchy built-ins are listed after user
   plugins, locked by default and following the system state — unlock them to

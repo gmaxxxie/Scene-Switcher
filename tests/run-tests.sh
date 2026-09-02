@@ -950,6 +950,68 @@ JSON
   echo "  (T17 done)"
 }
 
+# ---------------------------------------------------------------- T18 Apply 关闭未受管部件不被陈旧快照复活（herdr 回归）
+
+# 真实故障回归（herdr 被“复活”）: 未受管（不在 default/任何场景/锁定里）的已知 bar 部件
+# 在配置面板里关闭并 Apply 后，`apply` 会先 `omarchy plugin disable`（把部件移出实时 bar），
+# 但随后的 activate_scene 用陈旧 _layouts[scene] 快照重新播种——快照里仍有该部件，而受管集
+# 不含它，transform 不会移除 → 部件被重新插回 bar（Apply 后“又出现”）。修复：播种时把
+# “目录已知、未受管、且已不在实时 bar”的部件从快照剔除，未受管部件才真正跟随系统状态。
+
+# 真实 omarchy 的 plugin disable 会把 bar-widget 从 bar.layout 里 splice 掉，这里如实模拟。
+t18_apply_off_unmanaged_not_resurrected() {
+  echo "T18 Apply 关闭未受管部件不被陈旧快照复活（herdr 回归）"
+  setup_env
+  export HOME="$WORK/home" OMARCHY_SCENES_DIR="$WORK/cfg/scenes" PATH="$WORK/bin:$PATH"
+  # catalog: 三个均未受管的 bar-widget（tray/tailscale 为内置、herdr 为第三方）+ 场景插件 user.focus
+  cat > "$WORK/bin/omarchy" <<SH
+#!/usr/bin/env bash
+case "\$1 \$2" in
+  "plugin list")
+    cat <<'J'
+[{"id":"omarchy.tray","name":"Tray","kinds":["bar-widget"],"enabled":true,"firstParty":true},
+ {"id":"io.github.fabean.herdr","name":"Herdr","kinds":["bar-widget"],"enabled":true,"firstParty":false},
+ {"id":"omarchy.tailscale","name":"Tailscale","kinds":["bar-widget"],"enabled":true,"firstParty":true},
+ {"id":"user.focus","name":"Focus","kinds":["bar-widget"],"enabled":false,"firstParty":false}]
+J
+    ;;
+  plugin\ disable*)
+    # 模拟真实 omarchy：把 bar-widget 从 bar.layout 中移除（splice）
+    id="\$3"
+    f="\$HOME/.config/omarchy/shell.json"
+    jq --arg i "\$id" 'walk(if type=="array" then map(select((.id // "") != \$i)) else . end)' "\$f" > "\$f.tmp" && mv "\$f.tmp" "\$f"
+    ;;
+  plugin\ enable*) exit 0 ;;
+  *) exit 0 ;;
+esac
+SH
+  chmod +x "$WORK/bin/omarchy"
+  # shell.json: tray + herdr + tailscale 都在 bar（herdr 未受管但启用）
+  cat > "$WORK/home/.config/omarchy/shell.json" <<'JSON'
+{"version":1,"bar":{"layout":{"left":[],"center":[],"right":[{"id":"omarchy.tray"},{"id":"io.github.fabean.herdr"},{"id":"omarchy.tailscale"}]}},"plugins":[],"disabledPlugins":[]}
+JSON
+  # scenes.json: default 场景的 _layouts 快照里含 herdr（真实数据形态：快照于关闭前录制）
+  cat > "$OMARCHY_SCENES_DIR/scenes.json" <<'JSON'
+{"version":1,"current":"default","default":[],"locked":[],"unlockedBuiltins":[],"scenes":{"dev":{"label":"Dev","plugins":[]}},"_layouts":{"default":{"left":[],"center":[],"right":[{"id":"omarchy.tray"},{"id":"io.github.fabean.herdr"},{"id":"omarchy.tailscale"}]}}}
+JSON
+  printf '{}' > "$OMARCHY_SCENES_DIR/entries.json"
+
+  right() { jq -r '.bar.layout.right | map(.id) | join(",")' "$WORK/home/.config/omarchy/shell.json"; }
+  # 前置：herdr 仍启用（在实时 bar）时，切到其它场景不得把它刷掉
+  "$SCENE" set dev >/dev/null 2>&1
+  expect "未关闭时 herdr 在其它场景仍保留" sh -c "jq -e '.bar.layout.right[] | select(.id == \"io.github.fabean.herdr\")' '$WORK/home/.config/omarchy/shell.json' >/dev/null"
+  "$SCENE" set default >/dev/null 2>&1
+  # Apply 关闭 herdr：disable 已把它移出实时 bar，陈旧快照不得把它复活回来
+  "$SCENE" apply default --off io.github.fabean.herdr >/dev/null 2>&1
+  assert_eq "Apply 关闭未受管 herdr 后不再出现在 bar" "$(right)" "omarchy.tray,omarchy.tailscale"
+  # 其它未受管部件（tailscale）不能被误删
+  expect "tailscale 仍保留在 bar" sh -c "jq -e '.bar.layout.right[] | select(.id == \"omarchy.tailscale\")' '$WORK/home/.config/omarchy/shell.json' >/dev/null"
+  # 缓存快照也要跟着变干净，否则下次进入 default 还会复活
+  expect "_layouts.default 已剔除 herdr" sh -c "jq -e '._layouts.default.right | all(.id != \"io.github.fabean.herdr\")' '$OMARCHY_SCENES_DIR/scenes.json' >/dev/null"
+  echo "  (T18 done)"
+}
+
+
 # ---------------------------------------------------------------- 汇总
 
 summary() {
@@ -982,4 +1044,5 @@ t14_reopen_marker
 t15_inheritance
 t16_apply_pending
 t17_stale_layout_keeps_unmanaged
+t18_apply_off_unmanaged_not_resurrected
 summary

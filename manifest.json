@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "max.scene",
   "name": "Scene Switcher",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "author": "max",
   "license": "MIT",
   "description": "Show the current omarchy scene in the bar and manage scene switching (backed by omarchy-scene)",

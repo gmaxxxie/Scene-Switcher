@@ -942,6 +942,14 @@ set_diff() {  # $1 = scene；$2 = quiet（不打印）
   # 目标场景，避免把上一个场景的残留部件带进下一个场景。受管部件去留仍由 transform 决定。
   cached_layout=$(jq -r --arg s "$scene" '._layouts[$s] // null' <<<"$SCENES_DOC")
   if [[ "$cached_layout" != "null" && -n "$cached_layout" ]]; then
+    # 快照可能早于用户后来手动启用/安装的部件——先把当前 bar 里“未受管、目录已知、
+    # 且快照缺失”的部件合并回快照（保留其在当前 bar 的位置），绝不因陈旧快照把后来
+    # 启用的部件（如 tailscale）从 bar 刷掉。反过来：快照里有、但当前 bar 里已不在的
+    # 目录已知的未受管部件（用户已在任何场景里关闭它，例如 herdr），必须从快照里
+    # 剔除——否则关闭后一 Apply 又被陈旧快照“复活”回 bar。未受管部件因此真正跟随
+    # 系统状态。目录未知的幽灵部件（如 dev.ghost）随所在场景的快照保留，不被带进其它
+    # 场景，也不受此剔除影响（omarchy 无法 disable 未知插件，只能是场景自有的摆布）。
+    # 受管部件去留仍由 transform 决定，这里只对未受管部件做“跟随实时 bar”的增删。
     merged_layout=$(jq -n \
       --argjson cached "$cached_layout" \
       --argjson live "$shell_doc" \
@@ -950,6 +958,8 @@ set_diff() {  # $1 = scene；$2 = quiet（不打印）
         def unmanaged($id): ($managed | index($id)) == null;
         def known($id): ($catalog | has($id)) == true;
         def present($lay; $id): ([($lay[] | .id // "")] | index($id)) != null;
+        def present_anywhere($id): [ ($live.bar.layout[] // [] ) | .[] | .id // "" ] | index($id) != null;
+        def keep_in_bar($id): (($id // "") == "") or (($managed | index($id)) != null) or present_anywhere($id) or (known($id) | not);
         def merge_section($s):
           reduce (($live.bar.layout[$s] // []) | to_entries[]) as $e (.;
             if ((($e.value.id // "") != "")
@@ -958,8 +968,11 @@ set_diff() {  # $1 = scene；$2 = quiet（不打印）
                 and (present(.[$s]; $e.value.id) | not))
             then .[$s] |= (([$e.key, length] | min) as $at | .[0:$at] + [$e.value] + .[$at:])
             else . end);
+        def drop_section($s):
+          .[$s] |= map(select(keep_in_bar(.id // "")));
         { left: ($cached.left // []), center: ($cached.center // []), right: ($cached.right // []) }
         | merge_section("left") | merge_section("center") | merge_section("right")
+        | drop_section("left") | drop_section("center") | drop_section("right")
       ')
     seeded_shell=$(jq --argjson lay "$merged_layout" '.bar.layout = $lay' <<<"$shell_doc")
   else
