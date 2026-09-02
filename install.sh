@@ -11,6 +11,9 @@
 #     omarchy plugin add https://github.com/gmaxxxie/Scene-Switcher.git --enable \
 #       && "$HOME/.config/omarchy/plugins/max.scene/install.sh"
 #
+#   一键更新（拉新插件文件 + 重装 CLI，scenes.json 配置永远保留）:
+#     "$HOME/.config/omarchy/plugins/max.scene/install.sh" --update
+#
 #   克隆仓库后直接跑:
 #     git clone https://github.com/gmaxxxie/Scene-Switcher.git
 #     cd Scene-Switcher && ./install.sh [repo-url]
@@ -24,6 +27,15 @@ SCENES_FILE="$HOME/.config/omarchy/scenes/scenes.json"
 CLI="$HOME/.local/bin/omarchy-scene"
 
 step() { printf '==> %s\n' "$*"; }
+
+if [[ "${1:-}" == "--update" ]]; then
+  if [[ -f "$PLUGIN_DIR/manifest.json" ]]; then
+    step "pulling latest plugin files (omarchy plugin update $PLUGIN_ID)"
+    omarchy plugin update "$PLUGIN_ID" --yes
+  else
+    step "plugin not installed yet — installing fresh instead"
+  fi
+fi
 
 if [[ -f "$PLUGIN_DIR/manifest.json" ]]; then
   step "plugin already installed at $PLUGIN_DIR (skipping add)"

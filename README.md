@@ -97,9 +97,10 @@ After `init`, `~/.config/omarchy/scenes/scenes.json` holds the scene
 definitions, `entries.json` caches plugin entry snapshots, and
 `ui-state.json` is the rendered state the panel's FileView watches.
 
-To update a previous install, either re-run `install.sh` (skips what is
-already present) or run `./sync.sh` from a fresh clone of this repository —
-it deploys the plugin folder **and** reinstalls the CLI in one step (see
+To update a previous install, run the plugin-folder `install.sh --update`
+(one command: git-pulls the new plugin files **and** reinstalls the CLI; see
+Update), or run `./sync.sh` from a fresh clone of this repository — it
+deploys the plugin folder **and** reinstalls the CLI in one step (see
 Development).
 
 The bar widget and config panel only ever consume the CLI-validated
@@ -110,20 +111,26 @@ regenerates it (add/set/label/icon/refresh/…).
 
 ## Update
 
-An existing install is updated in two steps (your `scenes.json` config is
-never touched):
+An existing install is updated in **one command** (your `scenes.json` config
+is never touched):
 
 ```sh
-# 1. Pull the new plugin files (the plugin is git-managed)
-omarchy plugin update max.scene
-
-# 2. Reinstall the companion CLI from the updated plugin folder
-#    (install.sh is idempotent: skips add, skips init, only refreshes the CLI)
-"$HOME/.config/omarchy/plugins/max.scene/install.sh"
+"$HOME/.config/omarchy/plugins/max.scene/install.sh" --update
 ```
 
-`init` is intentionally skipped because `scenes.json` already exists. Scene
-semantics (default base / locked inheritance) apply to existing scenes
+`--update` first runs `omarchy plugin update max.scene` to git-pull the new
+plugin files into the git-managed plugin folder, then falls through to the
+same idempotent steps as a fresh install — skipping `add` (already
+installed), re-installing the companion CLI from the updated folder, and
+skipping `init` because `scenes.json` already exists. Devices that haven't
+pulled the new `install.sh` yet can run the equivalent one-liner:
+
+```sh
+omarchy plugin update max.scene \
+  && "$HOME/.config/omarchy/plugins/max.scene/install.sh"
+```
+
+Scene semantics (default base / locked inheritance) apply to existing scenes
 automatically — no migration needed. If your `scenes.json` was created by an
 older `init` and still lists omarchy built-ins in `default`, re-snapshot it
 once with `omarchy-scene init --force` (the old file is backed up first).
