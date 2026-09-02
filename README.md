@@ -162,6 +162,9 @@ report instead of guessing**.
 > the error instead of guessing. No shell restart is needed unless the
 > update touched `Scene.qml`/`ConfigPanel.qml`.
 
+A standalone copy with the same prompt (plus a 中文 version) lives in
+[`docs/update-prompt.md`](docs/update-prompt.md) — handy for forwarding or
+linking.
 ## Usage
 
 - Click the bar widget (or press `SUPER + SHIFT + T`) to switch scenes
